@@ -1,0 +1,1546 @@
+﻿import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb;
+import 'package:flutter/material.dart';
+import 'package:flutter_callkit_incoming/entities/entities.dart';
+import 'package:flutter_callkit_incoming/flutter_callkit_incoming.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
+import 'package:mime/mime.dart';
+
+final _nativePhoneBridge = _NativePhoneBridge();
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  if (!kIsWeb) {
+    FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+  }
+
+  runApp(const ChattyFriendsApp());
+}
+
+@pragma('vm:entry-point')
+Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  await _nativePhoneBridge.ensureFirebaseInitialized();
+}
+
+class _NativePhoneBridge {
+final FlutterLocalNotificationsPlugin _notifications = FlutterLocalNotificationsPlugin();
+static const AndroidNotificationChannel _messageChannel = AndroidNotificationChannel(
+  'chattyfriends_messages',
+  'Mensajes ChattyFriends',
+  description: 'Notificaciones de mensajes entrantes',
+  importance: Importance.max,
+);
+
+StreamSubscription<CallEvent?>? _callkitSubscription;
+StreamSubscription<String>? _tokenRefreshSubscription;
+String? _activeCallId;
+String? _pushToken;
+bool _firebaseReady = false;
+Map<String, dynamic>? _activeCallPayload;
+
+  Future<void> initialize() async {
+    if (kIsWeb) return;
+
+    const settings = InitializationSettings(
+      android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+      iOS: DarwinInitializationSettings(),
+    );
+
+    await _notifications.initialize(
+      settings,
+      onDidReceiveNotificationResponse: (response) {
+        final rawPayload = response.payload;
+        if (rawPayload == null || rawPayload.isEmpty) return;
+        try {
+          final payload = Map<String, dynamic>.from(jsonDecode(rawPayload) as Map);
+          _openConversation(payload);
+        } catch (_) {}
+      },
+    );
+
+    await _notifications
+        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+        ?.createNotificationChannel(_messageChannel);
+
+    _callkitSubscription ??= FlutterCallkitIncoming.onEvent.listen(_handleCallKitEvent);
+    await _initializeFirebaseMessaging();
+  }
+
+  Future<bool> ensureFirebaseInitialized() async {
+    if (kIsWeb) return false;
+    if (_firebaseReady && Firebase.apps.isNotEmpty) return true;
+
+    try {
+      if (Firebase.apps.isEmpty) {
+        await Firebase.initializeApp();
+      }
+      _firebaseReady = true;
+      return true;
+    } catch (error) {
+      debugPrint('Firebase init skipped: $error');
+      _firebaseReady = false;
+      return false;
+    }
+  }
+
+  Future<void> _initializeFirebaseMessaging() async {
+    if (!await ensureFirebaseInitialized()) return;
+
+    final messaging = FirebaseMessaging.instance;
+    await messaging.setAutoInitEnabled(true);
+    await messaging.requestPermission(
+      alert: true,
+      badge: true,
+      sound: true,
+      provisional: false,
+    );
+
+    final token = await messaging.getToken();
+    _setPushToken(token);
+
+    _tokenRefreshSubscription ??= messaging.onTokenRefresh.listen(_setPushToken);
+
+    FirebaseMessaging.onMessage.listen((message) async {
+      await handleRemoteMessage(message, fromTap: false);
+    });
+
+    FirebaseMessaging.onMessageOpenedApp.listen((message) async {
+      await handleRemoteMessage(message, fromTap: true);
+    });
+
+    final initialMessage = await messaging.getInitialMessage();
+    if (initialMessage != null) {
+      await handleRemoteMessage(initialMessage, fromTap: true);
+    }
+  }
+
+  Future<void> handleRemoteMessage(
+    RemoteMessage message, {
+    required bool fromTap,
+  }) async {
+    final payload = _payloadFromRemoteMessage(message);
+    if (payload.isEmpty) return;
+
+    if (fromTap) {
+      await _openConversation(payload);
+      return;
+    }
+
+    if ((payload['type']?.toString() == 'call') || payload['callType'] != null) {
+      await showIncomingCall(payload);
+      return;
+    }
+
+    await showIncomingMessage(payload);
+  }
+
+  Map<String, dynamic> _payloadFromRemoteMessage(RemoteMessage message) {
+    final data = Map<String, dynamic>.from(message.data);
+    if (data.isEmpty && message.notification == null) {
+      return <String, dynamic>{};
+    }
+
+    final type = data['type']?.toString() ?? data['notificationType']?.toString() ?? 'message';
+    final title = message.notification?.title ??
+        data['title']?.toString() ??
+        data['senderName']?.toString() ??
+        data['groupName']?.toString() ??
+        'ChattyFriends';
+    final body = message.notification?.body ??
+        data['body']?.toString() ??
+        data['message']?.toString() ??
+        'Nueva actividad';
+
+    return <String, dynamic>{
+      ...data,
+      'type': type,
+      'title': title,
+      'body': body,
+      if (data['chatType'] == null && data['groupId'] != null) 'chatType': 'group',
+      if (data['chatType'] == null && data['senderId'] != null) 'chatType': 'private',
+      if (data['callType'] == null && type == 'call') 'callType': data['groupId'] != null ? 'group' : 'private',
+      if (data['callerName'] == null && data['senderName'] != null) 'callerName': data['senderName'],
+      if (data['callerId'] == null && data['senderId'] != null) 'callerId': data['senderId'],
+      if (data['handle'] == null) 'handle': data['groupName'] ?? data['senderName'] ?? title,
+      if (data['callId'] == null) 'callId': message.messageId ?? DateTime.now().microsecondsSinceEpoch.toString(),
+      if (data['id'] == null) 'id': message.messageId ?? DateTime.now().microsecondsSinceEpoch.toString(),
+    };
+  }
+
+  Future<void> showIncomingMessage(Map<String, dynamic> payload) async {
+    if (kIsWeb) return;
+
+    final title = payload['title']?.toString() ?? 'ChattyFriends';
+    final body = payload['body']?.toString() ?? 'Nuevo mensaje';
+
+    await _notifications.show(
+      Object.hash(title, body, payload['id']),
+      title,
+      body,
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'chattyfriends_messages',
+          'Mensajes ChattyFriends',
+          channelDescription: 'Notificaciones de mensajes entrantes',
+          importance: Importance.max,
+          priority: Priority.high,
+        ),
+        iOS: DarwinNotificationDetails(
+          presentAlert: true,
+          presentBadge: true,
+          presentSound: true,
+        ),
+      ),
+      payload: jsonEncode(payload),
+    );
+  }
+
+  Future<void> showIncomingCall(Map<String, dynamic> payload) async {
+    if (kIsWeb) return;
+
+    final callPayload = Map<String, dynamic>.from(payload);
+    callPayload.putIfAbsent(
+      'callId',
+      () => DateTime.now().microsecondsSinceEpoch.toString(),
+    );
+
+    _activeCallId = callPayload['callId']?.toString();
+    _activeCallPayload = callPayload;
+
+    final params = CallKitParams(
+      id: _activeCallId,
+      nameCaller: callPayload['callerName']?.toString() ?? callPayload['title']?.toString() ?? 'ChattyFriends',
+      appName: 'ChattyFriends',
+      handle: callPayload['handle']?.toString() ?? 'Llamada entrante',
+      type: 0,
+      duration: 30000,
+      textAccept: 'Aceptar',
+      textDecline: 'Rechazar',
+      extra: callPayload,
+      missedCallNotification: const NotificationParams(
+        showNotification: true,
+        isShowCallback: false,
+        subtitle: 'Llamada perdida',
+        callbackText: 'Abrir',
+      ),
+      android: const AndroidParams(
+        isCustomNotification: false,
+        isShowLogo: false,
+        isShowCallID: false,
+        isShowFullLockedScreen: true,
+        ringtonePath: 'system_ringtone_default',
+        incomingCallNotificationChannelName: 'Llamadas ChattyFriends',
+        missedCallNotificationChannelName: 'Llamadas perdidas ChattyFriends',
+        backgroundColor: '#128C7E',
+        actionColor: '#25D366',
+        textColor: '#ffffff',
+      ),
+      ios: const IOSParams(
+        iconName: 'AppIcon',
+        handleType: 'generic',
+        supportsVideo: false,
+        maximumCallGroups: 1,
+        maximumCallsPerCallGroup: 1,
+        audioSessionMode: 'default',
+        audioSessionActive: true,
+        audioSessionPreferredSampleRate: 44100.0,
+        audioSessionPreferredIOBufferDuration: 0.005,
+        supportsDTMF: false,
+        supportsHolding: false,
+        supportsGrouping: true,
+        supportsUngrouping: true,
+        ringtonePath: 'system_ringtone_default',
+      ),
+    );
+
+    await FlutterCallkitIncoming.showCallkitIncoming(params);
+  }
+
+  Future<void> markCallConnected(Map<String, dynamic> payload) async {
+    final callId = payload['callId']?.toString() ?? _activeCallId;
+    if (callId == null || callId.isEmpty) return;
+    await FlutterCallkitIncoming.setCallConnected(callId);
+  }
+
+  Future<void> endCall(Map<String, dynamic> payload) async {
+    final callId = payload['callId']?.toString() ?? _activeCallId;
+    if (callId == null || callId.isEmpty) return;
+    _activeCallId = null;
+    _activeCallPayload = null;
+    await FlutterCallkitIncoming.endCall(callId);
+  }
+
+  Future<void> _handleCallKitEvent(CallEvent? event) async {
+    if (event == null) return;
+
+    final currentEvent = event.event.toString();
+
+    if (currentEvent.endsWith('actionCallAccept')) {
+      final payload = _payloadFromEvent(event.body) ?? _activeCallPayload;
+      if (payload != null) {
+        await _runJavaScript(
+          'window.ChattyNative && window.ChattyNative.answerIncomingCall(${jsonEncode(payload)});',
+        );
+      }
+      return;
+    }
+
+    if (currentEvent.endsWith('actionCallDecline') ||
+        currentEvent.endsWith('actionCallEnded') ||
+        currentEvent.endsWith('actionCallTimeout')) {
+      final payload = _payloadFromEvent(event.body) ?? _activeCallPayload;
+      _activeCallId = null;
+      _activeCallPayload = null;
+      if (payload != null) {
+        await _runJavaScript(
+          'window.ChattyNative && window.ChattyNative.rejectIncomingCall(${jsonEncode(payload)});',
+        );
+      }
+    }
+  }
+
+  Map<String, dynamic>? _payloadFromEvent(dynamic body) {
+    if (body is! Map) return null;
+    final map = Map<String, dynamic>.from(body);
+    final extra = map['extra'];
+    if (extra is Map) {
+      return Map<String, dynamic>.from(extra);
+    }
+    return map;
+  }
+
+  void _setPushToken(String? token) {
+    if (token == null || token.isEmpty) return;
+    _pushToken = token;
+  }
+}
+
+class ChattyFriendsApp extends StatelessWidget {
+  const ChattyFriendsApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'ChattyFriends',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF25D366)),
+        scaffoldBackgroundColor: const Color(0xFFF2F7F5),
+        useMaterial3: true,
+      ),
+      home: const NativeLoginPage(),
+    );
+  }
+}
+
+class _ChattyConfig {
+  static const supabaseUrl = 'https://xijruxarvehmlvzbnffn.supabase.co';
+  static const supabaseAnon =
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhpanJ1eGFydmVobWx2emJuZmZuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI2NTIyMjgsImV4cCI6MjA4ODIyODIyOH0.CvoIzfgzZLkCa9Tuix4U4sP0fp1oJjEwjn-Yuczo3Yk';
+  static const appVersion = 'v3.3 - 03/10/2026';
+  static const changelog = [
+    'Manejo de mensajes: ahora se pueden editar y eliminar.',
+    'Mejoras en llamadas y llamadas grupales.',
+    'App movil en desarrollo para iPhone y Android.',
+  ];
+}
+
+class NativeLoginPage extends StatefulWidget {
+  const NativeLoginPage({super.key});
+
+  @override
+  State<NativeLoginPage> createState() => _NativeLoginPageState();
+}
+
+class _NativeLoginPageState extends State<NativeLoginPage> {
+  final _userController = TextEditingController();
+  final _passwordController = TextEditingController();
+  bool _isSubmitting = false;
+  String? _errorText;
+
+  @override
+  void dispose() {
+    _userController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    FocusScope.of(context).unfocus();
+    final username = _userController.text.trim();
+    final password = _passwordController.text;
+
+    if (username.isEmpty || password.isEmpty) {
+      setState(() => _errorText = 'Completa usuario y contrasena.');
+      return;
+    }
+
+    setState(() {
+      _isSubmitting = true;
+      _errorText = null;
+    });
+
+    try {
+      final userProfile = await _fetchUserProfile(username, password);
+      if (!mounted) return;
+
+      if (userProfile == null) {
+        setState(() => _errorText = 'Usuario o contrasena incorrectos.');
+        return;
+      }
+
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => NativeUpdatesPage(userProfile: userProfile),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _errorText = 'No se pudo conectar con ChattyFriends.');
+    } finally {
+      if (mounted) {
+        setState(() => _isSubmitting = false);
+      }
+    }
+  }
+
+  Future<Map<String, dynamic>?> _fetchUserProfile(String username, String password) async {
+    final uri = Uri.parse('${_ChattyConfig.supabaseUrl}/rest/v1/profiles').replace(
+      queryParameters: {
+        'select': '*',
+        'username': 'eq.$username',
+        'clave': 'eq.$password',
+        'limit': '1',
+      },
+    );
+
+    final response = await http.get(
+      uri,
+      headers: {
+        'apikey': _ChattyConfig.supabaseAnon,
+        'Authorization': 'Bearer ${_ChattyConfig.supabaseAnon}',
+        'Accept': 'application/json',
+      },
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception('Auth error ${response.statusCode}');
+    }
+
+    final decoded = jsonDecode(response.body);
+    if (decoded is List && decoded.isNotEmpty && decoded.first is Map) {
+      return Map<String, dynamic>.from(decoded.first as Map);
+    }
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Stack(
+        children: [
+          const _LoginBackground(),
+          SafeArea(
+            child: Center(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(24),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 420),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(32),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color(0x14000000),
+                          blurRadius: 30,
+                          offset: Offset(0, 14),
+                        ),
+                      ],
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(28),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Container(
+                            width: 72,
+                            height: 72,
+                            decoration: const BoxDecoration(
+                              color: Color(0xFF25D366),
+                              shape: BoxShape.circle,
+                            ),
+                            alignment: Alignment.center,
+                            child: const Icon(
+                              Icons.chat_bubble_rounded,
+                              color: Colors.white,
+                              size: 34,
+                            ),
+                          ),
+                          const SizedBox(height: 20),
+                          Text(
+                            'ChattyFriends',
+                            textAlign: TextAlign.center,
+                            style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                              fontWeight: FontWeight.w800,
+                              color: const Color(0xFF111B21),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Login nativo para iOS y Android.',
+                            textAlign: TextAlign.center,
+                            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                              color: const Color(0xFF667781),
+                            ),
+                          ),
+                          const SizedBox(height: 24),
+                          TextField(
+                            controller: _userController,
+                            textInputAction: TextInputAction.next,
+                            decoration: const InputDecoration(
+                              labelText: 'Usuario',
+                              prefixIcon: Icon(Icons.person_outline),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.all(Radius.circular(18)),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          TextField(
+                            controller: _passwordController,
+                            obscureText: true,
+                            onSubmitted: (_) => _submit(),
+                            decoration: const InputDecoration(
+                              labelText: 'Contrasena',
+                              prefixIcon: Icon(Icons.lock_outline),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.all(Radius.circular(18)),
+                              ),
+                            ),
+                          ),
+                          if (_errorText != null) ...[
+                            const SizedBox(height: 14),
+                            Text(
+                              _errorText!,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                color: Color(0xFFC62828),
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 20),
+                          FilledButton(
+                            onPressed: _isSubmitting ? null : _submit,
+                            style: FilledButton.styleFrom(
+                              backgroundColor: const Color(0xFF128C7E),
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 16),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(18),
+                              ),
+                            ),
+                            child: _isSubmitting
+                                ? const SizedBox(
+                                    width: 22,
+                                    height: 22,
+                                    child: CircularProgressIndicator(strokeWidth: 2.4),
+                                  )
+                                : const Text('Iniciar sesion'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class NativeUpdatesPage extends StatelessWidget {
+  const NativeUpdatesPage({
+    super.key,
+    required this.userProfile,
+  });
+
+  final Map<String, dynamic> userProfile;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Align(
+                alignment: Alignment.centerLeft,
+                child: IconButton.filledTonal(
+                  onPressed: () => Navigator.of(context).pop(),
+                  icon: const Icon(Icons.arrow_back_rounded),
+                ),
+              ),
+              const SizedBox(height: 24),
+              Text(
+                'Novedades',
+                style: Theme.of(context).textTheme.headlineLarge?.copyWith(
+                  fontWeight: FontWeight.w800,
+                  color: const Color(0xFF111B21),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                _ChattyConfig.appVersion,
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  color: const Color(0xFF128C7E),
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 20),
+              ..._ChattyConfig.changelog.map(
+                (item) => Container(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  padding: const EdgeInsets.all(18),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(color: const Color(0xFFE3E8EA)),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        width: 40,
+                        height: 40,
+                        decoration: const BoxDecoration(
+                          color: Color(0xFFE8F5E9),
+                          shape: BoxShape.circle,
+                        ),
+                        alignment: Alignment.center,
+                        child: const Icon(
+                          Icons.done_rounded,
+                          color: Color(0xFF128C7E),
+                        ),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Text(
+                          item,
+                          style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                            height: 1.35,
+                            color: const Color(0xFF111B21),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const Spacer(),
+              FilledButton(
+                onPressed: () {
+                  Navigator.of(context).pushReplacement(
+                    MaterialPageRoute<void>(
+                      builder: (_) => ChatShellPage(userProfile: userProfile),
+                    ),
+                  );
+                },
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFF25D366),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 18),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                ),
+                child: const Text('Entrar al chat'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class ChatShellPage extends StatefulWidget {
+  const ChatShellPage({
+    super.key,
+    required this.userProfile,
+  });
+
+  final Map<String, dynamic> userProfile;
+
+  @override
+  State<ChatShellPage> createState() => _ChatShellPageState();
+}
+
+class _ChatShellPageState extends State<ChatShellPage> {
+  final _messageController = TextEditingController();
+
+  List<Map<String, dynamic>> _friends = const [];
+  List<Map<String, dynamic>> _groups = const [];
+  List<Map<String, dynamic>> _messages = const [];
+
+  Map<String, dynamic>? _activeFriend;
+  Map<String, dynamic>? _activeGroup;
+
+  bool _loadingSidebar = true;
+  bool _loadingMessages = false;
+  bool _sending = false;
+
+  bool get _isGroupMode => _activeGroup != null;
+  bool get _hasSelection => _activeFriend != null || _activeGroup != null;
+
+  String get _userId => widget.userProfile['id'].toString();
+  String get _username => widget.userProfile['username']?.toString() ?? '';
+
+  Map<String, String> get _headers => {
+        'apikey': _ChattyConfig.supabaseAnon,
+        'Authorization': 'Bearer ${_ChattyConfig.supabaseAnon}',
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+      };
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSidebar();
+  }
+
+  @override
+  void dispose() {
+    _messageController.dispose();
+    super.dispose();
+  }
+
+  // ── Sidebar data ──
+
+  Future<void> _loadSidebar() async {
+    setState(() => _loadingSidebar = true);
+    try {
+      final friendsUri = Uri.parse('${_ChattyConfig.supabaseUrl}/rest/v1/friends').replace(
+        queryParameters: {
+          'select': 'friend_id,profiles!friends_friend_id_fkey(id,username,avatar_url)',
+          'user_id': 'eq.$_userId',
+        },
+      );
+      final groupsUri = Uri.parse('${_ChattyConfig.supabaseUrl}/rest/v1/group_members').replace(
+        queryParameters: {
+          'select': 'group_id,groups(id,name,code)',
+          'user_id': 'eq.$_userId',
+        },
+      );
+
+      final responses = await Future.wait([
+        http.get(friendsUri, headers: _headers),
+        http.get(groupsUri, headers: _headers),
+      ]);
+
+      final friendsData = jsonDecode(responses[0].body);
+      final groupsData = jsonDecode(responses[1].body);
+
+      final friends = <Map<String, dynamic>>[];
+      if (friendsData is List) {
+        for (final item in friendsData) {
+          if (item is Map) friends.add(Map<String, dynamic>.from(item));
+        }
+      }
+
+      final groups = <Map<String, dynamic>>[];
+      if (groupsData is List) {
+        for (final item in groupsData) {
+          if (item is Map) groups.add(Map<String, dynamic>.from(item));
+        }
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _friends = friends;
+        _groups = groups;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No se pudo cargar la lista de chats.')),
+      );
+    } finally {
+      if (mounted) setState(() => _loadingSidebar = false);
+    }
+  }
+
+  // ── Add friend ──
+
+  Future<void> _showAddFriendDialog() async {
+    final controller = TextEditingController();
+    final username = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Agregar amigo'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'Nombre de usuario'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancelar')),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Agregar'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (username == null || username.isEmpty) return;
+    await _addFriend(username);
+  }
+
+  Future<void> _addFriend(String friendUsername) async {
+    try {
+      final lookupUri = Uri.parse('${_ChattyConfig.supabaseUrl}/rest/v1/profiles').replace(
+        queryParameters: {
+          'select': 'id',
+          'username': 'eq.$friendUsername',
+          'limit': '1',
+        },
+      );
+      final lookupResponse = await http.get(lookupUri, headers: _headers);
+      final lookupData = jsonDecode(lookupResponse.body);
+      if (lookupData is! List || lookupData.isEmpty) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Usuario no encontrado.')),
+        );
+        return;
+      }
+      final friendId = lookupData.first['id'].toString();
+      if (friendId == _userId) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No puedes agregarte a ti mismo.')),
+        );
+        return;
+      }
+
+      final uri = Uri.parse('${_ChattyConfig.supabaseUrl}/rest/v1/friends');
+      await http.post(
+        uri,
+        headers: {..._headers, 'Prefer': 'return=minimal'},
+        body: jsonEncode({'user_id': _userId, 'friend_id': friendId}),
+      );
+      await http.post(
+        uri,
+        headers: {..._headers, 'Prefer': 'return=minimal'},
+        body: jsonEncode({'user_id': friendId, 'friend_id': _userId}),
+      );
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('$friendUsername agregado.')),
+      );
+      await _loadSidebar();
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No se pudo agregar amigo.')),
+      );
+    }
+  }
+
+  // ── Create group ──
+
+  Future<void> _showCreateGroupDialog() async {
+    final controller = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Crear grupo'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'Nombre del grupo'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancelar')),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Crear'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name == null || name.isEmpty) return;
+    await _createGroup(name);
+  }
+
+  String _generateGroupCode() {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    final rng = DateTime.now().microsecondsSinceEpoch;
+    return List.generate(6, (i) => chars[(rng ~/ (i + 1)) % chars.length]).join();
+  }
+
+  Future<void> _createGroup(String name) async {
+    try {
+      final code = _generateGroupCode();
+      final uri = Uri.parse('${_ChattyConfig.supabaseUrl}/rest/v1/groups');
+      final response = await http.post(
+        uri,
+        headers: {..._headers, 'Prefer': 'return=representation'},
+        body: jsonEncode({
+          'name': name,
+          'code': code,
+          'created_by': _userId,
+        }),
+      );
+      final data = jsonDecode(response.body);
+      if (data is! List || data.isEmpty) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No se pudo crear el grupo.')),
+        );
+        return;
+      }
+      final groupId = data.first['id'].toString();
+
+      final memberUri = Uri.parse('${_ChattyConfig.supabaseUrl}/rest/v1/group_members');
+      await http.post(
+        memberUri,
+        headers: {..._headers, 'Prefer': 'return=minimal'},
+        body: jsonEncode({'group_id': groupId, 'user_id': _userId}),
+      );
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Grupo "$name" creado. Codigo: $code')),
+      );
+      await _loadSidebar();
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No se pudo crear el grupo.')),
+      );
+    }
+  }
+
+  // ── Join group ──
+
+  Future<void> _showJoinGroupDialog() async {
+    final controller = TextEditingController();
+    final code = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Unirse a grupo'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          textCapitalization: TextCapitalization.characters,
+          decoration: const InputDecoration(hintText: 'Codigo del grupo'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancelar')),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Unirse'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (code == null || code.isEmpty) return;
+    await _joinGroup(code);
+  }
+
+  Future<void> _joinGroup(String code) async {
+    try {
+      final lookupUri = Uri.parse('${_ChattyConfig.supabaseUrl}/rest/v1/groups').replace(
+        queryParameters: {
+          'select': 'id,name',
+          'code': 'eq.$code',
+          'limit': '1',
+        },
+      );
+      final lookupResponse = await http.get(lookupUri, headers: _headers);
+      final lookupData = jsonDecode(lookupResponse.body);
+      if (lookupData is! List || lookupData.isEmpty) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Grupo no encontrado.')),
+        );
+        return;
+      }
+      final groupId = lookupData.first['id'].toString();
+      final groupName = lookupData.first['name']?.toString() ?? 'Grupo';
+
+      final memberUri = Uri.parse('${_ChattyConfig.supabaseUrl}/rest/v1/group_members');
+      await http.post(
+        memberUri,
+        headers: {..._headers, 'Prefer': 'return=minimal'},
+        body: jsonEncode({'group_id': groupId, 'user_id': _userId}),
+      );
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Te uniste a "$groupName".')),
+      );
+      await _loadSidebar();
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No se pudo unir al grupo.')),
+      );
+    }
+  }
+
+  // ── Logout ──
+
+  void _logout() {
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute<void>(builder: (_) => const NativeLoginPage()),
+      (route) => false,
+    );
+  }
+
+  // ── Open conversations ──
+
+  Future<void> _openPrivate(Map<String, dynamic> friend) async {
+    setState(() {
+      _activeFriend = friend;
+      _activeGroup = null;
+      _messages = const [];
+    });
+    await _loadPrivateMessages();
+  }
+
+  Future<void> _openGroup(Map<String, dynamic> groupMember) async {
+    setState(() {
+      _activeGroup = Map<String, dynamic>.from(groupMember['groups'] as Map);
+      _activeFriend = null;
+      _messages = const [];
+    });
+    await _loadGroupMessages();
+  }
+
+  void _backToList() {
+    setState(() {
+      _activeFriend = null;
+      _activeGroup = null;
+      _messages = const [];
+    });
+  }
+
+  // ── Messages ──
+
+  Future<void> _loadPrivateMessages() async {
+    final friendId = _activeFriend?['friend_id']?.toString();
+    if (friendId == null) return;
+
+    setState(() => _loadingMessages = true);
+    try {
+      final uri = Uri.parse('${_ChattyConfig.supabaseUrl}/rest/v1/messages').replace(
+        queryParameters: {
+          'select': '*',
+          'or': 'and(sender_id.eq.$_userId,receiver_id.eq.$friendId),and(sender_id.eq.$friendId,receiver_id.eq.$_userId)',
+          'order': 'created_at.asc',
+        },
+      );
+
+      final response = await http.get(uri, headers: _headers);
+      final data = jsonDecode(response.body);
+      final messages = <Map<String, dynamic>>[];
+      if (data is List) {
+        for (final item in data) {
+          if (item is Map) messages.add(Map<String, dynamic>.from(item));
+        }
+      }
+
+      if (!mounted) return;
+      setState(() => _messages = messages);
+    } catch (_) {
+      if (!mounted) return;
+    } finally {
+      if (mounted) setState(() => _loadingMessages = false);
+    }
+  }
+
+  Future<void> _loadGroupMessages() async {
+    final groupId = _activeGroup?['id']?.toString();
+    if (groupId == null) return;
+
+    setState(() => _loadingMessages = true);
+    try {
+      final uri = Uri.parse('${_ChattyConfig.supabaseUrl}/rest/v1/group_messages').replace(
+        queryParameters: {
+          'select': '*,profiles(username)',
+          'group_id': 'eq.$groupId',
+          'order': 'created_at.asc',
+        },
+      );
+
+      final response = await http.get(uri, headers: _headers);
+      final data = jsonDecode(response.body);
+      final messages = <Map<String, dynamic>>[];
+      if (data is List) {
+        for (final item in data) {
+          if (item is Map) messages.add(Map<String, dynamic>.from(item));
+        }
+      }
+
+      if (!mounted) return;
+      setState(() => _messages = messages);
+    } catch (_) {
+      if (!mounted) return;
+    } finally {
+      if (mounted) setState(() => _loadingMessages = false);
+    }
+  }
+
+  Future<void> _reloadActiveConversation() async {
+    if (_isGroupMode) {
+      await _loadGroupMessages();
+    } else {
+      await _loadPrivateMessages();
+    }
+  }
+
+  Future<void> _sendMessage() async {
+    final text = _messageController.text.trim();
+    if (text.isEmpty || !_hasSelection || _sending) return;
+
+    setState(() => _sending = true);
+    try {
+      if (_isGroupMode) {
+        final groupId = _activeGroup?['id']?.toString();
+        if (groupId == null) return;
+
+        final uri = Uri.parse('${_ChattyConfig.supabaseUrl}/rest/v1/group_messages');
+        await http.post(
+          uri,
+          headers: {..._headers, 'Prefer': 'return=minimal'},
+          body: jsonEncode({
+            'group_id': groupId,
+            'sender_id': _userId,
+            'content': text,
+          }),
+        );
+      } else {
+        final friendId = _activeFriend?['friend_id']?.toString();
+        if (friendId == null) return;
+
+        final uri = Uri.parse('${_ChattyConfig.supabaseUrl}/rest/v1/messages');
+        await http.post(
+          uri,
+          headers: {..._headers, 'Prefer': 'return=minimal'},
+          body: jsonEncode({
+            'sender_id': _userId,
+            'receiver_id': friendId,
+            'content': text,
+          }),
+        );
+      }
+
+      _messageController.clear();
+      await _reloadActiveConversation();
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No se pudo enviar el mensaje.')),
+      );
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  // ── Build ──
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final mobile = constraints.maxWidth < 900;
+        if (mobile && _hasSelection) {
+          return _buildConversationPage();
+        }
+        return _buildListPage(mobile: mobile);
+      },
+    );
+  }
+
+  Widget _buildListPage({required bool mobile}) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF2F7F5),
+      appBar: AppBar(
+        automaticallyImplyLeading: false,
+        backgroundColor: const Color(0xFF128C7E),
+        foregroundColor: Colors.white,
+        elevation: 0,
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'ChattyFriends',
+              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 20),
+            ),
+            Text(
+              '@$_username',
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w400),
+            ),
+          ],
+        ),
+        actions: [
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert),
+            onSelected: (value) {
+              switch (value) {
+                case 'add_friend':
+                  _showAddFriendDialog();
+                case 'create_group':
+                  _showCreateGroupDialog();
+                case 'join_group':
+                  _showJoinGroupDialog();
+                case 'logout':
+                  _logout();
+              }
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'add_friend', child: Text('Agregar amigo')),
+              PopupMenuItem(value: 'create_group', child: Text('Crear grupo')),
+              PopupMenuItem(value: 'join_group', child: Text('Unirse a grupo')),
+              PopupMenuDivider(),
+              PopupMenuItem(value: 'logout', child: Text('Cerrar sesion')),
+            ],
+          ),
+        ],
+      ),
+      body: _loadingSidebar
+          ? const Center(child: CircularProgressIndicator())
+          : RefreshIndicator(
+              onRefresh: _loadSidebar,
+              child: ListView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                children: [
+                  if (_friends.isNotEmpty) ...[
+                    const _SectionHeader(label: 'Privados'),
+                    for (final friend in _friends)
+                      _ChatTile(
+                        icon: Icons.person_rounded,
+                        color: const Color(0xFF25D366),
+                        title: friend['profiles']?['username']?.toString() ?? 'Usuario',
+                        onTap: () => _openPrivate(friend),
+                      ),
+                  ],
+                  if (_groups.isNotEmpty) ...[
+                    const _SectionHeader(label: 'Grupos'),
+                    for (final groupMember in _groups)
+                      _ChatTile(
+                        icon: Icons.group_rounded,
+                        color: const Color(0xFF128C7E),
+                        title: groupMember['groups']?['name']?.toString() ?? 'Grupo',
+                        subtitle: groupMember['groups']?['code']?.toString(),
+                        onTap: () => _openGroup(groupMember),
+                      ),
+                  ],
+                  if (_friends.isEmpty && _groups.isEmpty)
+                    Padding(
+                      padding: const EdgeInsets.all(32),
+                      child: Column(
+                        children: [
+                          Icon(Icons.chat_bubble_outline_rounded,
+                              size: 64, color: Colors.grey.shade300),
+                          const SizedBox(height: 16),
+                          const Text(
+                            'Sin conversaciones.\nAgrega un amigo o unete a un grupo.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: Color(0xFF667781)),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ),
+    );
+  }
+
+  Widget _buildConversationPage() {
+    final title = _isGroupMode
+        ? (_activeGroup?['name']?.toString() ?? 'Grupo')
+        : (_activeFriend?['profiles']?['username']?.toString() ?? 'Chat');
+
+    return Scaffold(
+      backgroundColor: const Color(0xFFECE5DD),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF128C7E),
+        foregroundColor: Colors.white,
+        elevation: 0,
+        leading: IconButton(
+          onPressed: _backToList,
+          icon: const Icon(Icons.arrow_back_rounded),
+        ),
+        title: Row(
+          children: [
+            CircleAvatar(
+              radius: 18,
+              backgroundColor: Colors.white24,
+              child: Icon(
+                _isGroupMode ? Icons.group_rounded : Icons.person_rounded,
+                size: 20,
+                color: Colors.white,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                title,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 17),
+              ),
+            ),
+          ],
+        ),
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: _loadingMessages
+                ? const Center(child: CircularProgressIndicator())
+                : ListView.builder(
+                    reverse: true,
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+                    itemCount: _messages.length,
+                    itemBuilder: (context, index) {
+                      final msg = _messages[_messages.length - 1 - index];
+                      final mine = msg['sender_id']?.toString() == _userId;
+                      final sender = msg['profiles']?['username']?.toString() ?? '';
+                      return _MessageBubble(
+                        text: msg['content']?.toString() ?? '',
+                        sender: _isGroupMode && !mine ? sender : null,
+                        mine: mine,
+                      );
+                    },
+                  ),
+          ),
+          Container(
+            color: const Color(0xFFF0F0F0),
+            padding: EdgeInsets.only(
+              left: 8,
+              right: 8,
+              top: 6,
+              bottom: MediaQuery.of(context).viewPadding.bottom + 6,
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _messageController,
+                    textInputAction: TextInputAction.send,
+                    onSubmitted: (_) => _sendMessage(),
+                    decoration: InputDecoration(
+                      hintText: 'Mensaje',
+                      filled: true,
+                      fillColor: Colors.white,
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(24),
+                        borderSide: BorderSide.none,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Container(
+                  decoration: const BoxDecoration(
+                    color: Color(0xFF128C7E),
+                    shape: BoxShape.circle,
+                  ),
+                  child: IconButton(
+                    onPressed: _sending ? null : _sendMessage,
+                    icon: _sending
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                          )
+                        : const Icon(Icons.send_rounded, color: Colors.white),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SectionHeader extends StatelessWidget {
+  const _SectionHeader({required this.label});
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+      child: Text(
+        label,
+        style: const TextStyle(
+          fontSize: 13,
+          fontWeight: FontWeight.w700,
+          color: Color(0xFF128C7E),
+          letterSpacing: 0.5,
+        ),
+      ),
+    );
+  }
+}
+
+class _ChatTile extends StatelessWidget {
+  const _ChatTile({
+    required this.icon,
+    required this.color,
+    required this.title,
+    this.subtitle,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final Color color;
+  final String title;
+  final String? subtitle;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      leading: CircleAvatar(
+        backgroundColor: color.withValues(alpha: 0.15),
+        child: Icon(icon, color: color),
+      ),
+      title: Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
+      subtitle: subtitle != null && subtitle!.isNotEmpty
+          ? Text(subtitle!, style: const TextStyle(fontSize: 12, color: Color(0xFF667781)))
+          : null,
+      trailing: const Icon(Icons.chevron_right_rounded, color: Color(0xFFBDBDBD)),
+      onTap: onTap,
+    );
+  }
+}
+
+class _MessageBubble extends StatelessWidget {
+  const _MessageBubble({
+    required this.text,
+    required this.mine,
+    this.sender,
+  });
+
+  final String text;
+  final bool mine;
+  final String? sender;
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        constraints: const BoxConstraints(maxWidth: 300),
+        decoration: BoxDecoration(
+          color: mine ? const Color(0xFFDCF8C6) : Colors.white,
+          borderRadius: BorderRadius.only(
+            topLeft: const Radius.circular(12),
+            topRight: const Radius.circular(12),
+            bottomLeft: mine ? const Radius.circular(12) : Radius.zero,
+            bottomRight: mine ? Radius.zero : const Radius.circular(12),
+          ),
+          boxShadow: const [
+            BoxShadow(color: Color(0x0A000000), blurRadius: 2, offset: Offset(0, 1)),
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+          children: [
+            if (sender != null && sender!.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 2),
+                child: Text(
+                  sender!,
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF128C7E),
+                  ),
+                ),
+              ),
+            Text(text, style: const TextStyle(fontSize: 15)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _LoginBackground extends StatelessWidget {
+  const _LoginBackground();
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        const DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [Color(0xFFE7FFF4), Color(0xFFF2F7F5)],
+            ),
+          ),
+        ),
+        Positioned(
+          top: -80,
+          left: -40,
+          child: Container(
+            width: 220,
+            height: 220,
+            decoration: const BoxDecoration(
+              color: Color(0x3325D366),
+              shape: BoxShape.circle,
+            ),
+          ),
+        ),
+        Positioned(
+          right: -70,
+          bottom: -50,
+          child: Container(
+            width: 240,
+            height: 240,
+            decoration: const BoxDecoration(
+              color: Color(0x22128C7E),
+              shape: BoxShape.circle,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+

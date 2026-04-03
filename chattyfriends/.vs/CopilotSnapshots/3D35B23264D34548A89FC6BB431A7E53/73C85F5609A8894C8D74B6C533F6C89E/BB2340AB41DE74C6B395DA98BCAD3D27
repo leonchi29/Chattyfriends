@@ -1,0 +1,715 @@
+﻿<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ChattyFriends - Dise&ntilde;o Final</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; height: 100vh; background: #e3effd; }
+
+    /* --- LOGIN (GRANDE Y CENTRADO) --- */
+    #login-screen { display: flex; justify-content: center; align-items: center; height: 100vh; }
+    .login-card { 
+      background: #fff; 
+      border-radius: 24px; 
+      padding: 50px 40px; 
+      width: 450px; 
+      box-shadow: 0 10px 30px rgba(0,0,0,0.1); 
+      text-align: center; 
+    }
+    .login-card h1 { font-size: 42px; margin-bottom: 25px; color: #000; font-weight: bold; }
+    .login-card input { 
+      width: 100%; 
+      padding: 15px; 
+      margin-bottom: 1px; /* Pegados como en tu imagen */
+      border: 1px solid #999; 
+      font-size: 18px; 
+      outline: none; 
+    }
+    .btn-login { 
+      width: 100%; 
+      padding: 18px; 
+      border: none; 
+      border-radius: 12px; 
+      color: #fff; 
+      font-size: 20px; 
+      font-weight: 600; 
+      cursor: pointer; 
+      margin-top: 15px;
+      transition: 0.2s;
+    }
+    .btn-reg { background: #4ba3f1; }
+    .btn-ini { background: #1b66c9; }
+
+    /* --- ESTRUCTURA DEL CHAT --- */
+    #chat-screen { display: none; height: 100vh; flex-direction: row; background: #fff; }
+    
+    .sidebar { 
+      width: 320px; 
+      background: #fff; 
+      border-right: 1px solid #eee; 
+      display: flex; 
+      flex-direction: column; 
+    }
+    
+    .sidebar-header { padding: 20px; border-bottom: 1px solid #f5f5f5; }
+
+    /* LISTAS CON SCROLL (Maximo 3-4 items visibles) */
+    .scroll-container {
+      max-height: 220px; 
+      overflow-y: auto;
+      padding: 10px;
+      background: #fdfdfd;
+      margin: 5px 10px;
+      border-radius: 10px;
+      border: 1px solid #f0f0f0;
+    }
+
+    .section-label {
+      padding: 15px 20px 5px;
+      font-size: 13px;
+      font-weight: bold;
+      color: #2e7d32;
+      text-transform: uppercase;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    /* INPUTS DE LA SIDEBAR (Mas limpios) */
+    .sidebar-form { padding: 10px 20px 20px; }
+    .sidebar-form input { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 8px; margin-bottom: 5px; font-size: 14px; }
+    .btn-sidebar { width: 100%; padding: 10px; border: none; border-radius: 8px; color: white; cursor: pointer; font-weight: bold; margin-bottom: 5px; }
+
+    /* ITEMS */
+    .chat-item { 
+      padding: 12px; 
+      margin-bottom: 8px; 
+      background: #fff; 
+      border-radius: 12px; 
+      display: flex; 
+      align-items: center; 
+      gap: 12px; 
+      cursor: pointer;
+      border: 1px solid #f0f0f0;
+      transition: 0.2s;
+    }
+    .chat-item:hover { background: #f0f7ff; }
+    .chat-item.active { background: #e3f2fd; border-color: #4ba3f1; }
+    .avatar { width: 40px; height: 40px; border-radius: 50%; background: #4ba3f1; color: white; display: flex; align-items: center; justify-content: center; font-weight: bold; }
+
+    /* CHAT AREA */
+    .chat-area { flex: 1; display: flex; flex-direction: column; }
+    .chat-messages { flex: 1; padding: 20px; overflow-y: auto; background: #f9f9f9; display: flex; flex-direction: column; gap: 10px; }
+    .msg { max-width: 70%; padding: 12px; border-radius: 15px; font-size: 15px; word-break: break-word; }
+    .msg.sent { align-self: flex-end; background: #1b66c9; color: #fff; }
+    .msg.received { align-self: flex-start; background: #eee; }
+    .msg img.file-img { max-width: 100%; border-radius: 10px; cursor: pointer; display: block; margin-top: 4px; }
+    .msg video, .msg audio { max-width: 100%; margin-top: 4px; border-radius: 8px; }
+    .msg .file-card { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 10px; background: rgba(0,0,0,.08); margin-top: 4px; text-decoration: none; color: inherit; }
+    .msg.sent .file-card { background: rgba(255,255,255,.15); }
+    .msg .file-card .file-icon { font-size: 24px; }
+    .msg .file-card .file-info { font-size: 12px; line-height: 1.3; }
+    .msg .file-card .file-name { font-weight: 600; font-size: 13px; }
+
+    .chat-input-bar { padding: 20px; display: flex; gap: 10px; border-top: 1px solid #eee; align-items: center; }
+    .chat-input-bar input[type=text] { flex: 1; padding: 12px; border: 1px solid #ddd; border-radius: 25px; outline: none; }
+    .chat-input-bar button { background: #1b66c9; color: white; border: none; padding: 10px 25px; border-radius: 25px; cursor: pointer; }
+    .btn-clip { background: none; border: none; font-size: 22px; cursor: pointer; padding: 6px; border-radius: 50%; transition: .2s; }
+    .btn-clip:hover { background: #e0e0e0; }
+
+    .toast {
+      position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+      padding: 12px 28px; border-radius: 10px; color: #fff; font-size: 15px;
+      z-index: 9999; display: none; box-shadow: 0 4px 16px rgba(0,0,0,.15);
+      animation: toastIn .3s;
+    }
+    .toast.error { background: #f44336; }
+    .toast.success { background: #4caf50; }
+    @keyframes toastIn { from { opacity:0; transform:translateX(-50%) translateY(-10px); } to { opacity:1; transform:translateX(-50%) translateY(0); } }
+
+    /* MODAL VERSION */
+    .modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:10000; display:flex; justify-content:center; align-items:center; animation: fadeInBg .3s; }
+    @keyframes fadeInBg { from{opacity:0} to{opacity:1} }
+    .modal-card { background:#fff; border-radius:20px; padding:36px 32px; width:420px; max-width:90vw; box-shadow:0 12px 40px rgba(0,0,0,.2); text-align:center; animation: modalPop .3s; }
+    @keyframes modalPop { from{opacity:0;transform:scale(.9)} to{opacity:1;transform:scale(1)} }
+    .modal-card h2 { font-size:28px; margin-bottom:6px; }
+    .modal-card .ver-tag { display:inline-block; background:#1b66c9; color:#fff; padding:4px 14px; border-radius:20px; font-size:13px; font-weight:700; margin-bottom:16px; }
+    .modal-card ul { text-align:left; margin:16px 0; padding-left:20px; }
+    .modal-card li { margin-bottom:8px; font-size:14px; color:#444; }
+    .modal-card li b { color:#1b66c9; }
+    .modal-card button { margin-top:10px; padding:12px 40px; background:#1b66c9; color:#fff; border:none; border-radius:12px; font-size:16px; font-weight:600; cursor:pointer; }
+
+    /* PROFILE PIC */
+    .profile-area { position:relative; width:64px; height:64px; margin:0 auto 10px; cursor:pointer; }
+    .profile-area img { width:64px; height:64px; border-radius:50%; object-fit:cover; border:3px solid #1b66c9; }
+    .profile-area .avatar-letter { width:64px; height:64px; border-radius:50%; background:#1b66c9; color:#fff; display:flex; align-items:center; justify-content:center; font-size:28px; font-weight:700; border:3px solid #1b66c9; }
+    .profile-area .cam-badge { position:absolute; bottom:0; right:0; background:#fff; border-radius:50%; width:22px; height:22px; display:flex; align-items:center; justify-content:center; font-size:12px; box-shadow:0 1px 4px rgba(0,0,0,.2); }
+    .avatar-img { width:40px; height:40px; border-radius:50%; object-fit:cover; }
+    .avatar-menu { position:absolute; top:68px; left:50%; transform:translateX(-50%); background:#fff; border-radius:12px; box-shadow:0 4px 20px rgba(0,0,0,.18); z-index:100; overflow:hidden; display:none; min-width:160px; }
+    .avatar-menu button { display:block; width:100%; padding:12px 18px; border:none; background:none; font-size:14px; text-align:left; cursor:pointer; }
+    .avatar-menu button:hover { background:#f0f7ff; }
+    .avatar-menu .remove-btn { color:#f44336; }
+
+    /* CROP MODAL */
+    .crop-modal { position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:10001; display:none; justify-content:center; align-items:center; }
+    .crop-card { background:#fff; border-radius:20px; padding:28px; width:340px; text-align:center; }
+    .crop-card h3 { margin-bottom:14px; font-size:18px; }
+    .crop-viewport { width:220px; height:220px; margin:0 auto; border-radius:50%; overflow:hidden; position:relative; cursor:grab; border:3px solid #1b66c9; background:#000; }
+    .crop-viewport:active { cursor:grabbing; }
+    .crop-viewport img { position:absolute; top:0; left:0; transform-origin:0 0; pointer-events:none; user-select:none; -webkit-user-drag:none; }
+    .crop-slider { width:200px; margin:14px auto 0; display:block; accent-color:#1b66c9; }
+    .crop-btns { display:flex; gap:10px; justify-content:center; margin-top:16px; }
+    .crop-btns button { padding:10px 28px; border:none; border-radius:10px; font-size:14px; font-weight:600; cursor:pointer; }
+    .crop-btn-save { background:#1b66c9; color:#fff; }
+    .crop-btn-cancel { background:#eee; color:#444; }
+  </style>
+</head>
+<body>
+
+<div id="toast" class="toast"></div>
+<div id="version-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeVersionModal()">
+  <div class="modal-card">
+    <h2>ChattyFriends</h2>
+    <span class="ver-tag" id="ver-tag"></span>
+    <p style="color:#888;font-size:13px;margin-bottom:10px">Novedades de esta versi&oacute;n:</p>
+    <ul>
+      <li><b>&#x1F916; IA integrada</b> &mdash; A&ntilde;ade a <b>AI</b> como amigo y chatea con inteligencia artificial</li>
+      <li><b>&#x1F4CE; Env&iacute;o de archivos</b> &mdash; Comparte fotos, videos, audios y documentos en cualquier chat</li>
+      <li><b>&#x1F4F7; Foto de perfil</b> &mdash; Sube tu foto de perfil desde la barra lateral</li>
+    </ul>
+    <button onclick="closeVersionModal()">Entendido</button>
+  </div>
+</div>
+
+<div id="crop-modal" class="crop-modal" onclick="if(event.target===this)closeCropModal()">
+  <div class="crop-card">
+    <h3>Ajustar foto</h3>
+    <div class="crop-viewport" id="crop-viewport">
+      <img id="crop-img" />
+    </div>
+    <input type="range" id="crop-zoom" class="crop-slider" min="100" max="300" value="100" oninput="updateCropZoom(this.value)" />
+    <div class="crop-btns">
+      <button class="crop-btn-cancel" onclick="closeCropModal()">Cancelar</button>
+      <button class="crop-btn-save" onclick="saveCrop()">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<div id="login-screen">
+  <div class="login-card">
+    <h1>ChattyFriends</h1>
+    <input id="auth-user" type="text" placeholder="Usuario" />
+    <input id="auth-pass" type="password" placeholder="Contrase&ntilde;a" />
+    <button class="btn-login btn-reg" onclick="register()">Registrarse</button>
+    <button class="btn-login btn-ini" onclick="login()">Iniciar Sesi&oacute;n</button>
+  </div>
+</div>
+
+<div id="chat-screen">
+  <div class="sidebar">
+    <div class="sidebar-header" style="text-align:center; position:relative">
+      <div class="profile-area" onclick="onAvatarClick(event)" title="Foto de perfil">
+        <div id="my-avatar-placeholder" class="avatar-letter">?</div>
+        <img id="my-avatar-img" style="display:none" />
+        <span class="cam-badge">&#x1F4F7;</span>
+      </div>
+      <div id="avatar-menu" class="avatar-menu">
+        <button onclick="changeAvatar()">&#x1F4F7; Cambiar foto</button>
+        <button class="remove-btn" onclick="removeAvatar()">&#x1F5D1; Quitar foto</button>
+      </div>
+      <input id="avatar-input" type="file" accept="image/*" style="display:none" onchange="uploadAvatar(this)" />
+      <h2 id="display-user" style="color:#1b66c9">@usuario</h2>
+    </div>
+
+    <div class="section-label">Amigos <span>+</span></div>
+    <div id="friends-list" class="scroll-container">
+      </div>
+    <div class="sidebar-form">
+      <input id="friend-input" type="text" placeholder="Buscar usuario..." />
+      <button class="btn-sidebar" style="background:#4caf50" onclick="addFriend()">A&ntilde;adir Amigo</button>
+    </div>
+
+    <div class="section-label">Grupos <span>&#x1F3E0;</span></div>
+    <div id="groups-list" class="scroll-container">
+      </div>
+    <div class="sidebar-form">
+      <input id="group-name-input" type="text" placeholder="Nombre del grupo..." />
+      <button class="btn-sidebar" style="background:#4caf50" onclick="createGroup()">Crear Grupo</button>
+      <input id="group-code-input" type="text" placeholder="C&oacute;digo..." style="margin-top:5px" />
+      <button class="btn-sidebar" style="background:#ff9800" onclick="joinGroup()">Unirse con C&oacute;digo</button>
+    </div>
+
+    <button onclick="logout()" style="margin: auto 20px 20px; padding: 10px; background: #f44336; color: white; border: none; border-radius: 8px; cursor: pointer;">Cerrar Sesi&oacute;n</button>
+  </div>
+
+  <div class="chat-area">
+    <div class="chat-header" style="padding: 20px; border-bottom: 1px solid #eee;">
+      <h3 id="chat-title">Selecciona un chat</h3>
+    </div>
+    <div id="chat-messages" class="chat-messages"></div>
+    <div class="chat-input-bar">
+      <button class="btn-clip" onclick="document.getElementById('file-input').click()" title="Enviar archivo">&#x1F4CE;</button>
+      <input id="file-input" type="file" style="display:none" onchange="sendFile(this)" />
+      <input id="msg-input" type="text" placeholder="Escribe un mensaje..." onkeydown="if(event.key==='Enter')sendMessage()" />
+      <button onclick="sendMessage()">Enviar</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const SUPABASE_URL = 'https://xijruxarvehmlvzbnffn.supabase.co';
+  const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhpanJ1eGFydmVobWx2emJuZmZuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI2NTIyMjgsImV4cCI6MjA4ODIyODIyOH0.CvoIzfgzZLkCa9Tuix4U4sP0fp1oJjEwjn-Yuczo3Yk';
+  const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+
+  let currentUser = null, activeFriend = null, activeGroup = null, chatMode = null;
+
+  var APP_VERSION = 'v2.0';
+
+  function showVersionPopup() {
+    var lastSeen = localStorage.getItem('chatty_ver');
+    if (lastSeen === APP_VERSION) return;
+    document.getElementById('ver-tag').textContent = APP_VERSION;
+    document.getElementById('version-modal').style.display = 'flex';
+  }
+  function closeVersionModal() {
+    document.getElementById('version-modal').style.display = 'none';
+    localStorage.setItem('chatty_ver', APP_VERSION);
+  }
+
+  // --- FOTO DE PERFIL ---
+  function onAvatarClick(e) {
+    e.stopPropagation();
+    if (currentUser.avatar_url) {
+      var menu = document.getElementById('avatar-menu');
+      menu.style.display = menu.style.display === 'block' ? 'none' : 'block';
+    } else {
+      document.getElementById('avatar-input').click();
+    }
+  }
+  function changeAvatar() {
+    document.getElementById('avatar-menu').style.display = 'none';
+    document.getElementById('avatar-input').click();
+  }
+  async function removeAvatar() {
+    document.getElementById('avatar-menu').style.display = 'none';
+    await sb.from('profiles').update({ avatar_url: null }).eq('id', currentUser.id);
+    currentUser.avatar_url = null;
+    localStorage.setItem('chatty_user', JSON.stringify(currentUser));
+    loadMyAvatar();
+    loadFriends();
+    toast('Foto eliminada', 'success');
+  }
+  document.addEventListener('click', function(e) {
+    var menu = document.getElementById('avatar-menu');
+    if (menu && !menu.contains(e.target)) menu.style.display = 'none';
+  });
+
+  var cropFile = null;
+  var cropScale = 1, cropX = 0, cropY = 0;
+  var cropDrag = false, cropStartX = 0, cropStartY = 0, cropOrigX = 0, cropOrigY = 0;
+  var cropNatW = 0, cropNatH = 0;
+
+  function uploadAvatar(input) {
+    var file = input.files[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) { toast('Solo se permiten im\u00E1genes'); input.value=''; return; }
+    if (file.size > 5*1024*1024) { toast('M\u00E1ximo 5MB'); input.value=''; return; }
+    cropFile = file;
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      var img = document.getElementById('crop-img');
+      img.onload = function() {
+        cropNatW = img.naturalWidth;
+        cropNatH = img.naturalHeight;
+        var vp = 220;
+        var fitScale = Math.max(vp / cropNatW, vp / cropNatH);
+        cropScale = fitScale;
+        cropX = (vp - cropNatW * cropScale) / 2;
+        cropY = (vp - cropNatH * cropScale) / 2;
+        document.getElementById('crop-zoom').min = Math.round(fitScale * 100);
+        document.getElementById('crop-zoom').max = Math.round(fitScale * 300);
+        document.getElementById('crop-zoom').value = Math.round(fitScale * 100);
+        applyCropTransform();
+        document.getElementById('crop-modal').style.display = 'flex';
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+    input.value = '';
+  }
+
+  function applyCropTransform() {
+    var img = document.getElementById('crop-img');
+    img.style.width = (cropNatW * cropScale) + 'px';
+    img.style.height = (cropNatH * cropScale) + 'px';
+    img.style.left = cropX + 'px';
+    img.style.top = cropY + 'px';
+  }
+
+  function updateCropZoom(val) {
+    var vp = 220;
+    var oldScale = cropScale;
+    cropScale = val / 100;
+    var cx = vp / 2, cy = vp / 2;
+    cropX = cx - (cx - cropX) * (cropScale / oldScale);
+    cropY = cy - (cy - cropY) * (cropScale / oldScale);
+    applyCropTransform();
+  }
+
+  (function() {
+    document.addEventListener('mousedown', function(e) {
+      var vp = document.getElementById('crop-viewport');
+      if (vp && vp.contains(e.target)) {
+        cropDrag = true; cropStartX = e.clientX; cropStartY = e.clientY;
+        cropOrigX = cropX; cropOrigY = cropY; e.preventDefault();
+      }
+    });
+    document.addEventListener('mousemove', function(e) {
+      if (!cropDrag) return;
+      cropX = cropOrigX + (e.clientX - cropStartX);
+      cropY = cropOrigY + (e.clientY - cropStartY);
+      applyCropTransform();
+    });
+    document.addEventListener('mouseup', function() { cropDrag = false; });
+    document.addEventListener('touchstart', function(e) {
+      var vp = document.getElementById('crop-viewport');
+      if (vp && vp.contains(e.target) && e.touches.length === 1) {
+        cropDrag = true; cropStartX = e.touches[0].clientX; cropStartY = e.touches[0].clientY;
+        cropOrigX = cropX; cropOrigY = cropY; e.preventDefault();
+      }
+    }, { passive: false });
+    document.addEventListener('touchmove', function(e) {
+      if (!cropDrag || !e.touches.length) return;
+      cropX = cropOrigX + (e.touches[0].clientX - cropStartX);
+      cropY = cropOrigY + (e.touches[0].clientY - cropStartY);
+      applyCropTransform(); e.preventDefault();
+    }, { passive: false });
+    document.addEventListener('touchend', function() { cropDrag = false; });
+  })();
+
+  function closeCropModal() {
+    document.getElementById('crop-modal').style.display = 'none';
+    cropFile = null;
+  }
+
+  async function saveCrop() {
+    var vp = 220, outSize = 256;
+    var canvas = document.createElement('canvas');
+    canvas.width = outSize; canvas.height = outSize;
+    var ctx = canvas.getContext('2d');
+    var img = document.getElementById('crop-img');
+    var ratio = outSize / vp;
+    ctx.drawImage(img, cropX * ratio, cropY * ratio, cropNatW * cropScale * ratio, cropNatH * cropScale * ratio);
+    canvas.toBlob(async function(blob) {
+      if (!blob) { toast('Error al recortar'); return; }
+      var path = 'avatars/' + currentUser.id + '/profile.png';
+      toast('Subiendo foto...', 'success');
+      var { error } = await sb.storage.from('chat-files').upload(path, blob, { upsert: true, contentType: 'image/png' });
+      if (error) { toast('Error: ' + error.message); return; }
+      var { data: u } = sb.storage.from('chat-files').getPublicUrl(path);
+      var url = u.publicUrl + '?t=' + Date.now();
+      await sb.from('profiles').update({ avatar_url: url }).eq('id', currentUser.id);
+      currentUser.avatar_url = url;
+      localStorage.setItem('chatty_user', JSON.stringify(currentUser));
+      loadMyAvatar();
+      closeCropModal();
+      toast('Foto actualizada', 'success');
+    }, 'image/png');
+  }
+
+  function loadMyAvatar() {
+    var img = document.getElementById('my-avatar-img');
+    var ph = document.getElementById('my-avatar-placeholder');
+    if (currentUser.avatar_url) {
+      img.src = currentUser.avatar_url;
+      img.style.display = 'block';
+      ph.style.display = 'none';
+    } else {
+      img.style.display = 'none';
+      ph.style.display = 'flex';
+      ph.textContent = currentUser.username[0].toUpperCase();
+    }
+  }
+
+  // --- BOT IA ---
+  const BOT_ID = '39224196-7790-4cb1-97ce-642a19adee34';
+  const AI_API_KEY = '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'; // Groq: https://console.groq.com
+
+  async function getBotReply(userMessage) {
+    try {
+      const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + AI_API_KEY },
+        body: JSON.stringify({
+          model: 'llama-3.1-8b-instant',
+          messages: [
+            { role: 'system', content: 'Eres AI, un asistente amigable en un chat llamado ChattyFriends. Responde en espa\u00F1ol, corto y natural, como si fueras un amigo.' },
+            { role: 'user', content: userMessage }
+          ]
+        })
+      });
+      const data = await res.json();
+      var reply;
+      if (!res.ok) {
+        reply = '\u26A0 ' + (data.error?.message || 'Error ' + res.status);
+      } else {
+        reply = data.choices?.[0]?.message?.content;
+        if (!reply) reply = '\u26A0 Respuesta vac\u00EDa de la IA.';
+      }
+      await sb.from('messages').insert({ sender_id: BOT_ID, receiver_id: currentUser.id, content: reply });
+      if (chatMode === 'private' && activeFriend && activeFriend.id === BOT_ID) loadMessages();
+    } catch(e) {
+      var errMsg = '\u26A0 No pude conectar: ' + (e.message || 'error desconocido');
+      await sb.from('messages').insert({ sender_id: BOT_ID, receiver_id: currentUser.id, content: errMsg });
+      if (chatMode === 'private' && activeFriend && activeFriend.id === BOT_ID) loadMessages();
+    }
+  }
+
+  // --- TOAST ---
+  function toast(msg, type) {
+    var t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className = 'toast ' + (type || 'error');
+    t.style.display = 'block';
+    setTimeout(function() { t.style.display = 'none'; }, 3000);
+  }
+
+  // --- FUNCIONES DE AUTH ---
+  async function register() {
+    const u = document.getElementById('auth-user').value.trim();
+    const p = document.getElementById('auth-pass').value;
+    if (!u || !p) return toast('Completa todos los campos');
+    const { error } = await sb.from('profiles').insert({ username: u, clave: p });
+    if(error) toast('El usuario ya existe');
+    else toast('\u00A1Registro exitoso!', 'success');
+  }
+
+  async function login() {
+    const u = document.getElementById('auth-user').value.trim();
+    const p = document.getElementById('auth-pass').value;
+    if (!u || !p) return toast('Completa todos los campos');
+    const { data } = await sb.from('profiles').select('*').eq('username', u).eq('clave', p).maybeSingle();
+    if(data) {
+      currentUser = data;
+      localStorage.setItem('chatty_user', JSON.stringify(data));
+      startApp();
+    } else toast('Datos incorrectos');
+  }
+
+  function logout() { localStorage.clear(); location.reload(); }
+
+  function startApp() {
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('chat-screen').style.display = 'flex';
+    document.getElementById('display-user').textContent = '@' + currentUser.username;
+    loadMyAvatar();
+    loadFriends(); loadGroups(); subscribeRealtime();
+    showVersionPopup();
+  }
+
+  // --- LOGICA DE CARGA Y CHAT ---
+  async function openChat(id, name) {
+    activeFriend = { id, name }; activeGroup = null; chatMode = 'private';
+    document.getElementById('chat-title').textContent = "Chat con " + name;
+    await loadMessages();
+    loadFriends();
+  }
+
+  async function openGroupChat(id, name, code) {
+    activeGroup = { id, name, code }; activeFriend = null; chatMode = 'group';
+    document.getElementById('chat-title').textContent = "Grupo: " + name;
+    await loadGroupMessages();
+    loadGroups();
+  }
+
+  async function loadMessages() {
+    const { data } = await sb.from('messages').select('*')
+      .or(`and(sender_id.eq.${currentUser.id},receiver_id.eq.${activeFriend.id}),and(sender_id.eq.${activeFriend.id},receiver_id.eq.${currentUser.id})`)
+      .order('created_at', { ascending: true });
+    render(data || []);
+  }
+
+  async function loadGroupMessages() {
+    const { data } = await sb.from('group_messages').select('*, profiles(username)')
+      .eq('group_id', activeGroup.id).order('created_at', { ascending: true });
+    render(data || [], true);
+  }
+
+  function render(msgs, isGroup = false) {
+    const c = document.getElementById('chat-messages');
+    c.innerHTML = '';
+    msgs.forEach(m => {
+      const isMe = m.sender_id === currentUser.id;
+      const div = document.createElement('div');
+      div.className = 'msg ' + (isMe ? 'sent' : 'received');
+      const sender = (!isMe && isGroup) ? '<b style="font-size:10px">' + (m.profiles?.username || '?') + '</b><br>' : '';
+      var body;
+      if (m.content && m.content.indexOf('<<FILE>>') === 0) {
+        body = renderFileContent(m.content, isMe);
+      } else {
+        body = m.content;
+      }
+      div.innerHTML = sender + body;
+      c.appendChild(div);
+    });
+    c.scrollTop = c.scrollHeight;
+  }
+
+  async function sendMessage() {
+    const i = document.getElementById('msg-input');
+    const val = i.value.trim(); if(!val) return;
+    if(chatMode === 'private') {
+      await sb.from('messages').insert({ sender_id: currentUser.id, receiver_id: activeFriend.id, content: val });
+      i.value = '';
+      await loadMessages();
+      if (activeFriend.id === BOT_ID) getBotReply(val);
+    } else {
+      await sb.from('group_messages').insert({ group_id: activeGroup.id, sender_id: currentUser.id, content: val });
+      i.value = '';
+      loadGroupMessages();
+    }
+  }
+
+  async function sendFile(input) {
+    var file = input.files[0];
+    if (!file) return;
+    if (file.size > 50 * 1024 * 1024) { toast('El archivo es muy grande (m\u00E1x 50MB)'); input.value = ''; return; }
+    if (!chatMode) { toast('Selecciona un chat primero'); input.value = ''; return; }
+    var ts = Date.now();
+    var safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+    var path = currentUser.id + '/' + ts + '_' + safeName;
+    toast('Subiendo archivo...', 'success');
+    var { error } = await sb.storage.from('chat-files').upload(path, file);
+    if (error) { toast('Error al subir: ' + error.message); input.value = ''; return; }
+    var { data: urlData } = sb.storage.from('chat-files').getPublicUrl(path);
+    var url = urlData.publicUrl;
+    var meta = JSON.stringify({ url: url, name: file.name, type: file.type, size: file.size });
+    var content = '<<FILE>>' + meta + '<<FILE>>';
+    if (chatMode === 'private') {
+      await sb.from('messages').insert({ sender_id: currentUser.id, receiver_id: activeFriend.id, content: content });
+      await loadMessages();
+    } else {
+      await sb.from('group_messages').insert({ group_id: activeGroup.id, sender_id: currentUser.id, content: content });
+      loadGroupMessages();
+    }
+    input.value = '';
+    toast('Archivo enviado', 'success');
+  }
+
+  function formatSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
+  function renderFileContent(content, isSent) {
+    try {
+      var json = content.replace(/<<FILE>>/g, '');
+      var f = JSON.parse(json);
+      var t = f.type || '';
+      if (t.startsWith('image/')) {
+        return '<img class="file-img" src="' + f.url + '" alt="' + f.name + '" onclick="window.open(this.src)" />';
+      }
+      if (t.startsWith('video/')) {
+        return '<video controls preload="metadata"><source src="' + f.url + '" type="' + f.type + '"></video>';
+      }
+      if (t.startsWith('audio/')) {
+        return '<audio controls preload="metadata"><source src="' + f.url + '" type="' + f.type + '"></audio>';
+      }
+      var icon = '\uD83D\uDCC4';
+      if (t.includes('pdf')) icon = '\uD83D\uDCC3';
+      if (t.includes('zip') || t.includes('rar') || t.includes('7z')) icon = '\uD83D\uDDC4';
+      var linkColor = isSent ? 'color:#fff' : 'color:#222';
+      return '<a class="file-card" href="' + f.url + '" target="_blank" style="' + linkColor + '">'
+        + '<span class="file-icon">' + icon + '</span>'
+        + '<div><div class="file-name">' + f.name + '</div>'
+        + '<div class="file-info">' + formatSize(f.size) + '</div></div></a>';
+    } catch(e) { return content; }
+  }
+
+  // --- GESTION DE LISTAS ---
+  async function loadFriends() {
+    const { data } = await sb.from('friends').select('friend_id, profiles!friends_friend_id_fkey(username, avatar_url)').eq('user_id', currentUser.id);
+    const list = document.getElementById('friends-list');
+    list.innerHTML = '';
+    data?.forEach(f => {
+      var isBot = f.friend_id === BOT_ID;
+      var div = document.createElement('div');
+      div.className = 'chat-item' + (activeFriend?.id === f.friend_id ? ' active' : '');
+      var avatarHtml;
+      if (isBot) {
+        avatarHtml = '<div class="avatar" style="background:#9c27b0">\uD83E\uDD16</div>';
+      } else if (f.profiles.avatar_url) {
+        avatarHtml = '<img class="avatar-img" src="' + f.profiles.avatar_url + '" />';
+      } else {
+        avatarHtml = '<div class="avatar">' + f.profiles.username[0].toUpperCase() + '</div>';
+      }
+      var label = isBot ? f.profiles.username + ' <small style="color:#9c27b0">Bot</small>' : f.profiles.username;
+      div.innerHTML = avatarHtml + '<b>' + label + '</b>';
+      div.onclick = () => openChat(f.friend_id, f.profiles.username);
+      list.appendChild(div);
+    });
+  }
+
+  async function addFriend() {
+    const u = document.getElementById('friend-input').value.trim();
+    if (!u) return toast('Escribe un nombre de usuario');
+    if (u === currentUser.username) return toast('No puedes a\u00F1adirte a ti mismo');
+    const { data: f } = await sb.from('profiles').select('id').eq('username', u).maybeSingle();
+    if(!f) return toast('No existe ese usuario');
+    const { data: already } = await sb.from('friends').select('id').or(`and(user_id.eq.${currentUser.id},friend_id.eq.${f.id}),and(user_id.eq.${f.id},friend_id.eq.${currentUser.id})`).maybeSingle();
+    if (already) return toast('Ya es tu amigo');
+    await sb.from('friends').insert([{user_id:currentUser.id, friend_id:f.id}, {user_id:f.id, friend_id:currentUser.id}]);
+    document.getElementById('friend-input').value = '';
+    toast('Amigo a\u00F1adido', 'success');
+    loadFriends();
+  }
+
+  async function loadGroups() {
+    const { data } = await sb.from('group_members').select('group_id, groups(id, name, code)').eq('user_id', currentUser.id);
+    const list = document.getElementById('groups-list');
+    list.innerHTML = '';
+    data?.forEach(gm => {
+      const g = gm.groups;
+      const div = document.createElement('div');
+      div.className = 'chat-item' + (activeGroup?.id === g.id ? ' active' : '');
+      div.innerHTML = `<div class="avatar" style="background:#4caf50">#</div><div><b>${g.name}</b><br><small>${g.code}</small></div>`;
+      div.onclick = () => openGroupChat(g.id, g.name, g.code);
+      list.appendChild(div);
+    });
+  }
+
+  async function createGroup() {
+    const n = document.getElementById('group-name-input').value.trim(); if(!n) return;
+    const c = Math.random().toString(36).substring(2,8).toUpperCase();
+    const { data: g } = await sb.from('groups').insert({ name: n, code: c, created_by: currentUser.id }).select().single();
+    await sb.from('group_members').insert({ group_id: g.id, user_id: currentUser.id });
+    document.getElementById('group-name-input').value = ''; loadGroups();
+  }
+
+  async function joinGroup() {
+    const c = document.getElementById('group-code-input').value.trim().toUpperCase();
+    if (!c) return toast('Escribe un c\u00F3digo');
+    const { data: g } = await sb.from('groups').select('id, name').eq('code', c).maybeSingle();
+    if(!g) return toast('C\u00F3digo no v\u00E1lido');
+    const { data: already } = await sb.from('group_members').select('id').eq('group_id', g.id).eq('user_id', currentUser.id).maybeSingle();
+    if (already) return toast('Ya eres miembro de este grupo');
+    await sb.from('group_members').insert({ group_id: g.id, user_id: currentUser.id });
+    document.getElementById('group-code-input').value = '';
+    toast('Te uniste a ' + g.name, 'success');
+    loadGroups();
+  }
+
+  function subscribeRealtime() {
+    sb.channel('db').on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, loadMessages)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'group_messages' }, loadGroupMessages).subscribe();
+  }
+
+  const saved = localStorage.getItem('chatty_user');
+  if(saved) { currentUser = JSON.parse(saved); startApp(); }
+</script>
+
+</body>
+</html>

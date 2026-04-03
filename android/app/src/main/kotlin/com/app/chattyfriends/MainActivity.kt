@@ -1,0 +1,5 @@
+package com.app.chattyfriends
+
+import io.flutter.embedding.android.FlutterActivity
+
+class MainActivity : FlutterActivity()

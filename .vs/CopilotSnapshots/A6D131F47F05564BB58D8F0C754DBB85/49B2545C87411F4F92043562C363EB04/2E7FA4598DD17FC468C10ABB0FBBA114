@@ -1,0 +1,1004 @@
+﻿import 'dart:async';
+import 'dart:convert';
+
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb;
+import 'package:flutter/material.dart';
+import 'package:flutter_callkit_incoming/entities/entities.dart';
+import 'package:flutter_callkit_incoming/flutter_callkit_incoming.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:http/http.dart' as http;
+import 'package:permission_handler/permission_handler.dart';
+
+InAppLocalhostServer? _localhostServer;
+final _nativePhoneBridge = _NativePhoneBridge();
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  if (!kIsWeb) {
+    FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+  }
+
+  await _nativePhoneBridge.initialize();
+
+  if (!kIsWeb) {
+    _localhostServer = InAppLocalhostServer(port: 8080);
+    await _localhostServer!.start();
+  }
+
+  runApp(const ChattyFriendsApp());
+}
+
+@pragma('vm:entry-point')
+Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  await _nativePhoneBridge.ensureFirebaseInitialized();
+}
+
+class _NativePhoneBridge {
+  final FlutterLocalNotificationsPlugin _notifications = FlutterLocalNotificationsPlugin();
+  static const AndroidNotificationChannel _messageChannel = AndroidNotificationChannel(
+    'chattyfriends_messages',
+    'Mensajes ChattyFriends',
+    description: 'Notificaciones de mensajes entrantes',
+    importance: Importance.max,
+  );
+
+  StreamSubscription<CallEvent?>? _callkitSubscription;
+  StreamSubscription<String>? _tokenRefreshSubscription;
+  InAppWebViewController? _controller;
+  final List<String> _pendingScripts = [];
+  String? _activeCallId;
+  String? _pushToken;
+  bool _firebaseReady = false;
+  bool _webReady = false;
+  Map<String, dynamic>? _activeCallPayload;
+
+  Future<void> initialize() async {
+    if (kIsWeb) return;
+
+    const settings = InitializationSettings(
+      android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+      iOS: DarwinInitializationSettings(),
+    );
+
+    await _notifications.initialize(
+      settings,
+      onDidReceiveNotificationResponse: (response) {
+        final rawPayload = response.payload;
+        if (rawPayload == null || rawPayload.isEmpty) return;
+        try {
+          final payload = Map<String, dynamic>.from(jsonDecode(rawPayload) as Map);
+          _openConversation(payload);
+        } catch (_) {}
+      },
+    );
+
+    await _notifications
+        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+        ?.createNotificationChannel(_messageChannel);
+
+    _callkitSubscription ??= FlutterCallkitIncoming.onEvent.listen(_handleCallKitEvent);
+    await _initializeFirebaseMessaging();
+  }
+
+  Future<bool> ensureFirebaseInitialized() async {
+    if (kIsWeb) return false;
+    if (_firebaseReady && Firebase.apps.isNotEmpty) return true;
+
+    try {
+      if (Firebase.apps.isEmpty) {
+        await Firebase.initializeApp();
+      }
+      _firebaseReady = true;
+      return true;
+    } catch (error) {
+      debugPrint('Firebase init skipped: $error');
+      _firebaseReady = false;
+      return false;
+    }
+  }
+
+  Future<void> _initializeFirebaseMessaging() async {
+    if (!await ensureFirebaseInitialized()) return;
+
+    final messaging = FirebaseMessaging.instance;
+    await messaging.setAutoInitEnabled(true);
+    await messaging.requestPermission(
+      alert: true,
+      badge: true,
+      sound: true,
+      provisional: false,
+    );
+
+    final token = await messaging.getToken();
+    _setPushToken(token);
+
+    _tokenRefreshSubscription ??= messaging.onTokenRefresh.listen(_setPushToken);
+
+    FirebaseMessaging.onMessage.listen((message) async {
+      await handleRemoteMessage(message, fromTap: false);
+    });
+
+    FirebaseMessaging.onMessageOpenedApp.listen((message) async {
+      await handleRemoteMessage(message, fromTap: true);
+    });
+
+    final initialMessage = await messaging.getInitialMessage();
+    if (initialMessage != null) {
+      await handleRemoteMessage(initialMessage, fromTap: true);
+    }
+  }
+
+  Future<void> handleRemoteMessage(
+    RemoteMessage message, {
+    required bool fromTap,
+  }) async {
+    final payload = _payloadFromRemoteMessage(message);
+    if (payload.isEmpty) return;
+
+    if (fromTap) {
+      await _openConversation(payload);
+      return;
+    }
+
+    if ((payload['type']?.toString() == 'call') || payload['callType'] != null) {
+      await showIncomingCall(payload);
+      return;
+    }
+
+    await showIncomingMessage(payload);
+  }
+
+  Map<String, dynamic> _payloadFromRemoteMessage(RemoteMessage message) {
+    final data = Map<String, dynamic>.from(message.data);
+    if (data.isEmpty && message.notification == null) {
+      return <String, dynamic>{};
+    }
+
+    final type = data['type']?.toString() ?? data['notificationType']?.toString() ?? 'message';
+    final title = message.notification?.title ??
+        data['title']?.toString() ??
+        data['senderName']?.toString() ??
+        data['groupName']?.toString() ??
+        'ChattyFriends';
+    final body = message.notification?.body ??
+        data['body']?.toString() ??
+        data['message']?.toString() ??
+        'Nueva actividad';
+
+    return <String, dynamic>{
+      ...data,
+      'type': type,
+      'title': title,
+      'body': body,
+      if (data['chatType'] == null && data['groupId'] != null) 'chatType': 'group',
+      if (data['chatType'] == null && data['senderId'] != null) 'chatType': 'private',
+      if (data['callType'] == null && type == 'call') 'callType': data['groupId'] != null ? 'group' : 'private',
+      if (data['callerName'] == null && data['senderName'] != null) 'callerName': data['senderName'],
+      if (data['callerId'] == null && data['senderId'] != null) 'callerId': data['senderId'],
+      if (data['handle'] == null) 'handle': data['groupName'] ?? data['senderName'] ?? title,
+      if (data['callId'] == null) 'callId': message.messageId ?? DateTime.now().microsecondsSinceEpoch.toString(),
+      if (data['id'] == null) 'id': message.messageId ?? DateTime.now().microsecondsSinceEpoch.toString(),
+    };
+  }
+
+  void attachController(InAppWebViewController controller) {
+    _controller = controller;
+    _webReady = false;
+  }
+
+  void detachController() {
+    _controller = null;
+    _webReady = false;
+  }
+
+  void onWebAppReady() {
+    _webReady = true;
+    _flushPendingScripts();
+    _syncPushTokenToWeb();
+  }
+
+  Future<void> showIncomingMessage(Map<String, dynamic> payload) async {
+    if (kIsWeb) return;
+
+    final title = payload['title']?.toString() ?? 'ChattyFriends';
+    final body = payload['body']?.toString() ?? 'Nuevo mensaje';
+
+    await _notifications.show(
+      Object.hash(title, body, payload['id']),
+      title,
+      body,
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'chattyfriends_messages',
+          'Mensajes ChattyFriends',
+          channelDescription: 'Notificaciones de mensajes entrantes',
+          importance: Importance.max,
+          priority: Priority.high,
+        ),
+        iOS: DarwinNotificationDetails(
+          presentAlert: true,
+          presentBadge: true,
+          presentSound: true,
+        ),
+      ),
+      payload: jsonEncode(payload),
+    );
+  }
+
+  Future<void> showIncomingCall(Map<String, dynamic> payload) async {
+    if (kIsWeb) return;
+
+    final callPayload = Map<String, dynamic>.from(payload);
+    callPayload.putIfAbsent(
+      'callId',
+      () => DateTime.now().microsecondsSinceEpoch.toString(),
+    );
+
+    _activeCallId = callPayload['callId']?.toString();
+    _activeCallPayload = callPayload;
+
+    final params = CallKitParams(
+      id: _activeCallId,
+      nameCaller: callPayload['callerName']?.toString() ?? callPayload['title']?.toString() ?? 'ChattyFriends',
+      appName: 'ChattyFriends',
+      handle: callPayload['handle']?.toString() ?? 'Llamada entrante',
+      type: 0,
+      duration: 30000,
+      textAccept: 'Aceptar',
+      textDecline: 'Rechazar',
+      extra: callPayload,
+      missedCallNotification: const NotificationParams(
+        showNotification: true,
+        isShowCallback: false,
+        subtitle: 'Llamada perdida',
+        callbackText: 'Abrir',
+      ),
+      android: const AndroidParams(
+        isCustomNotification: false,
+        isShowLogo: false,
+        isShowCallID: false,
+        isShowFullLockedScreen: true,
+        ringtonePath: 'system_ringtone_default',
+        incomingCallNotificationChannelName: 'Llamadas ChattyFriends',
+        missedCallNotificationChannelName: 'Llamadas perdidas ChattyFriends',
+        backgroundColor: '#128C7E',
+        actionColor: '#25D366',
+        textColor: '#ffffff',
+      ),
+      ios: const IOSParams(
+        iconName: 'AppIcon',
+        handleType: 'generic',
+        supportsVideo: false,
+        maximumCallGroups: 1,
+        maximumCallsPerCallGroup: 1,
+        audioSessionMode: 'default',
+        audioSessionActive: true,
+        audioSessionPreferredSampleRate: 44100.0,
+        audioSessionPreferredIOBufferDuration: 0.005,
+        supportsDTMF: false,
+        supportsHolding: false,
+        supportsGrouping: true,
+        supportsUngrouping: true,
+        ringtonePath: 'system_ringtone_default',
+      ),
+    );
+
+    await FlutterCallkitIncoming.showCallkitIncoming(params);
+  }
+
+  Future<void> markCallConnected(Map<String, dynamic> payload) async {
+    final callId = payload['callId']?.toString() ?? _activeCallId;
+    if (callId == null || callId.isEmpty) return;
+    await FlutterCallkitIncoming.setCallConnected(callId);
+  }
+
+  Future<void> endCall(Map<String, dynamic> payload) async {
+    final callId = payload['callId']?.toString() ?? _activeCallId;
+    if (callId == null || callId.isEmpty) return;
+    _activeCallId = null;
+    _activeCallPayload = null;
+    await FlutterCallkitIncoming.endCall(callId);
+  }
+
+  Future<void> _handleCallKitEvent(CallEvent? event) async {
+    if (event == null) return;
+
+    final currentEvent = event.event.toString();
+
+    if (currentEvent.endsWith('actionCallAccept')) {
+      final payload = _payloadFromEvent(event.body) ?? _activeCallPayload;
+      if (payload != null) {
+        await _runJavaScript(
+          'window.ChattyNative && window.ChattyNative.answerIncomingCall(${jsonEncode(payload)});',
+        );
+      }
+      return;
+    }
+
+    if (currentEvent.endsWith('actionCallDecline') ||
+        currentEvent.endsWith('actionCallEnded') ||
+        currentEvent.endsWith('actionCallTimeout')) {
+      final payload = _payloadFromEvent(event.body) ?? _activeCallPayload;
+      _activeCallId = null;
+      _activeCallPayload = null;
+      if (payload != null) {
+        await _runJavaScript(
+          'window.ChattyNative && window.ChattyNative.rejectIncomingCall(${jsonEncode(payload)});',
+        );
+      }
+    }
+  }
+
+  Map<String, dynamic>? _payloadFromEvent(dynamic body) {
+    if (body is! Map) return null;
+    final map = Map<String, dynamic>.from(body);
+    final extra = map['extra'];
+    if (extra is Map) {
+      return Map<String, dynamic>.from(extra);
+    }
+    return map;
+  }
+
+  void _setPushToken(String? token) {
+    if (token == null || token.isEmpty) return;
+    _pushToken = token;
+    _syncPushTokenToWeb();
+  }
+
+  void _syncPushTokenToWeb() {
+    if (_pushToken == null) return;
+    final payload = <String, dynamic>{
+      'token': _pushToken,
+      'platform': defaultTargetPlatform.name,
+    };
+    _runJavaScript(
+      'window.ChattyNative && window.ChattyNative.registerPushToken(${jsonEncode(payload)});',
+    );
+  }
+
+  Future<void> _openConversation(Map<String, dynamic> payload) async {
+    await _runJavaScript(
+      'window.ChattyNative && window.ChattyNative.openConversation(${jsonEncode(payload)});',
+    );
+  }
+
+  Future<void> _runJavaScript(String source) async {
+    final controller = _controller;
+    if (controller == null || !_webReady) {
+      _pendingScripts.add(source);
+      return;
+    }
+    await controller.evaluateJavascript(source: source);
+  }
+
+  void _flushPendingScripts() {
+    final controller = _controller;
+    if (controller == null || !_webReady || _pendingScripts.isEmpty) return;
+    final scripts = List<String>.from(_pendingScripts);
+    _pendingScripts.clear();
+    for (final script in scripts) {
+      controller.evaluateJavascript(source: script);
+    }
+  }
+}
+
+class ChattyFriendsApp extends StatelessWidget {
+  const ChattyFriendsApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'ChattyFriends',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF25D366)),
+        scaffoldBackgroundColor: const Color(0xFFF2F7F5),
+        useMaterial3: true,
+      ),
+      home: const NativeLoginPage(),
+    );
+  }
+}
+
+class _ChattyConfig {
+  static const supabaseUrl = 'https://xijruxarvehmlvzbnffn.supabase.co';
+  static const supabaseAnon =
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhpanJ1eGFydmVobWx2emJuZmZuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI2NTIyMjgsImV4cCI6MjA4ODIyODIyOH0.CvoIzfgzZLkCa9Tuix4U4sP0fp1oJjEwjn-Yuczo3Yk';
+  static const appVersion = 'v3.3 - 03/10/2026';
+  static const changelog = [
+    'Manejo de mensajes: ahora se pueden editar y eliminar.',
+    'Mejoras en llamadas y llamadas grupales.',
+    'App movil en desarrollo para iPhone y Android.',
+  ];
+}
+
+class NativeLoginPage extends StatefulWidget {
+  const NativeLoginPage({super.key});
+
+  @override
+  State<NativeLoginPage> createState() => _NativeLoginPageState();
+}
+
+class _NativeLoginPageState extends State<NativeLoginPage> {
+  final _userController = TextEditingController();
+  final _passwordController = TextEditingController();
+  bool _isSubmitting = false;
+  String? _errorText;
+
+  @override
+  void dispose() {
+    _userController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    FocusScope.of(context).unfocus();
+    final username = _userController.text.trim();
+    final password = _passwordController.text;
+
+    if (username.isEmpty || password.isEmpty) {
+      setState(() => _errorText = 'Completa usuario y contrasena.');
+      return;
+    }
+
+    setState(() {
+      _isSubmitting = true;
+      _errorText = null;
+    });
+
+    try {
+      final userProfile = await _fetchUserProfile(username, password);
+      if (!mounted) return;
+
+      if (userProfile == null) {
+        setState(() => _errorText = 'Usuario o contrasena incorrectos.');
+        return;
+      }
+
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => NativeUpdatesPage(userProfile: userProfile),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _errorText = 'No se pudo conectar con ChattyFriends.');
+    } finally {
+      if (mounted) {
+        setState(() => _isSubmitting = false);
+      }
+    }
+  }
+
+  Future<Map<String, dynamic>?> _fetchUserProfile(String username, String password) async {
+    final uri = Uri.parse('${_ChattyConfig.supabaseUrl}/rest/v1/profiles').replace(
+      queryParameters: {
+        'select': '*',
+        'username': 'eq.$username',
+        'clave': 'eq.$password',
+        'limit': '1',
+      },
+    );
+
+    final response = await http.get(
+      uri,
+      headers: {
+        'apikey': _ChattyConfig.supabaseAnon,
+        'Authorization': 'Bearer ${_ChattyConfig.supabaseAnon}',
+        'Accept': 'application/json',
+      },
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception('Auth error ${response.statusCode}');
+    }
+
+    final decoded = jsonDecode(response.body);
+    if (decoded is List && decoded.isNotEmpty && decoded.first is Map) {
+      return Map<String, dynamic>.from(decoded.first as Map);
+    }
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Stack(
+        children: [
+          const _LoginBackground(),
+          SafeArea(
+            child: Center(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(24),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 420),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(32),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color(0x14000000),
+                          blurRadius: 30,
+                          offset: Offset(0, 14),
+                        ),
+                      ],
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(28),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Container(
+                            width: 72,
+                            height: 72,
+                            decoration: const BoxDecoration(
+                              color: Color(0xFF25D366),
+                              shape: BoxShape.circle,
+                            ),
+                            alignment: Alignment.center,
+                            child: const Icon(
+                              Icons.chat_bubble_rounded,
+                              color: Colors.white,
+                              size: 34,
+                            ),
+                          ),
+                          const SizedBox(height: 20),
+                          Text(
+                            'ChattyFriends',
+                            textAlign: TextAlign.center,
+                            style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                              fontWeight: FontWeight.w800,
+                              color: const Color(0xFF111B21),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Login nativo para iOS y Android.',
+                            textAlign: TextAlign.center,
+                            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                              color: const Color(0xFF667781),
+                            ),
+                          ),
+                          const SizedBox(height: 24),
+                          TextField(
+                            controller: _userController,
+                            textInputAction: TextInputAction.next,
+                            decoration: const InputDecoration(
+                              labelText: 'Usuario',
+                              prefixIcon: Icon(Icons.person_outline),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.all(Radius.circular(18)),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          TextField(
+                            controller: _passwordController,
+                            obscureText: true,
+                            onSubmitted: (_) => _submit(),
+                            decoration: const InputDecoration(
+                              labelText: 'Contrasena',
+                              prefixIcon: Icon(Icons.lock_outline),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.all(Radius.circular(18)),
+                              ),
+                            ),
+                          ),
+                          if (_errorText != null) ...[
+                            const SizedBox(height: 14),
+                            Text(
+                              _errorText!,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                color: Color(0xFFC62828),
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 20),
+                          FilledButton(
+                            onPressed: _isSubmitting ? null : _submit,
+                            style: FilledButton.styleFrom(
+                              backgroundColor: const Color(0xFF128C7E),
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 16),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(18),
+                              ),
+                            ),
+                            child: _isSubmitting
+                                ? const SizedBox(
+                                    width: 22,
+                                    height: 22,
+                                    child: CircularProgressIndicator(strokeWidth: 2.4),
+                                  )
+                                : const Text('Iniciar sesion'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class NativeUpdatesPage extends StatelessWidget {
+  const NativeUpdatesPage({
+    super.key,
+    required this.userProfile,
+  });
+
+  final Map<String, dynamic> userProfile;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Align(
+                alignment: Alignment.centerLeft,
+                child: IconButton.filledTonal(
+                  onPressed: () => Navigator.of(context).pop(),
+                  icon: const Icon(Icons.arrow_back_rounded),
+                ),
+              ),
+              const SizedBox(height: 24),
+              Text(
+                'Novedades',
+                style: Theme.of(context).textTheme.headlineLarge?.copyWith(
+                  fontWeight: FontWeight.w800,
+                  color: const Color(0xFF111B21),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                _ChattyConfig.appVersion,
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  color: const Color(0xFF128C7E),
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 20),
+              ..._ChattyConfig.changelog.map(
+                (item) => Container(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  padding: const EdgeInsets.all(18),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(color: const Color(0xFFE3E8EA)),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        width: 40,
+                        height: 40,
+                        decoration: const BoxDecoration(
+                          color: Color(0xFFE8F5E9),
+                          shape: BoxShape.circle,
+                        ),
+                        alignment: Alignment.center,
+                        child: const Icon(
+                          Icons.done_rounded,
+                          color: Color(0xFF128C7E),
+                        ),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Text(
+                          item,
+                          style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                            height: 1.35,
+                            color: const Color(0xFF111B21),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const Spacer(),
+              FilledButton(
+                onPressed: () {
+                  Navigator.of(context).pushReplacement(
+                    MaterialPageRoute<void>(
+                      builder: (_) => ChatShellPage(userProfile: userProfile),
+                    ),
+                  );
+                },
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFF25D366),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 18),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                ),
+                child: const Text('Entrar al chat'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class ChatShellPage extends StatefulWidget {
+  const ChatShellPage({
+    super.key,
+    required this.userProfile,
+  });
+
+  final Map<String, dynamic> userProfile;
+
+  @override
+  State<ChatShellPage> createState() => _ChatShellPageState();
+}
+
+class _ChatShellPageState extends State<ChatShellPage> {
+  InAppWebViewController? _controller;
+  bool _bootstrapped = false;
+  bool _ready = false;
+  String _statusText = 'Conectando con ChattyFriends...';
+
+  WebUri get _initialUrl =>
+      kIsWeb ? WebUri('chat.html') : WebUri('http://localhost:8080/assets/chat.html');
+
+  @override
+  void initState() {
+    super.initState();
+    _requestRequiredPermissions();
+  }
+
+  @override
+  void dispose() {
+    _nativePhoneBridge.detachController();
+    super.dispose();
+  }
+
+  Future<void> _requestRequiredPermissions() async {
+    if (kIsWeb) return;
+    await Permission.notification.request();
+    await Permission.microphone.request();
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      try {
+        await FlutterCallkitIncoming.requestFullIntentPermission();
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _bootstrap() async {
+    if (_bootstrapped || _controller == null) return;
+    _bootstrapped = true;
+
+    final configJson = jsonEncode({
+      'managedByFlutter': true,
+      'skipVersionPopup': true,
+      'mobileShell': true,
+    });
+    final profileJson = jsonEncode(widget.userProfile);
+
+    await _controller!.evaluateJavascript(
+      source: 'window.ChattyNative && window.ChattyNative.configure($configJson);',
+    );
+
+    setState(() => _statusText = 'Entrando...');
+
+    await _controller!.evaluateJavascript(
+      source: 'window.ChattyNative && window.ChattyNative.loginWithUser($profileJson);',
+    );
+  }
+
+  Map<String, dynamic> _payloadFromArgs(List<dynamic> args) {
+    if (args.isEmpty || args.first is! Map) return <String, dynamic>{};
+    return Map<String, dynamic>.from(args.first as Map);
+  }
+
+  void _handleAuthResult(List<dynamic> args) {
+    final payload = _payloadFromArgs(args);
+    final success = payload['success'] == true;
+
+    if (success) {
+      if (mounted) {
+        setState(() {
+          _statusText = 'Cargando chats...';
+          _ready = true;
+        });
+      }
+      return;
+    }
+
+    final message = payload['message']?.toString() ?? 'No se pudo iniciar sesion.';
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute<void>(builder: (_) => const NativeLoginPage()),
+      (route) => false,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Stack(
+        children: [
+          InAppWebView(
+            initialUrlRequest: URLRequest(url: _initialUrl),
+            initialSettings: InAppWebViewSettings(
+              javaScriptEnabled: true,
+              mediaPlaybackRequiresUserGesture: false,
+              allowsInlineMediaPlayback: true,
+              domStorageEnabled: true,
+              databaseEnabled: true,
+              javaScriptCanOpenWindowsAutomatically: true,
+              supportMultipleWindows: true,
+              allowFileAccess: true,
+              allowContentAccess: true,
+              mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW,
+              useWideViewPort: false,
+              transparentBackground: true,
+            ),
+            onWebViewCreated: (controller) {
+              _controller = controller;
+              _nativePhoneBridge.attachController(controller);
+              controller.addJavaScriptHandler(
+                handlerName: 'authResult',
+                callback: (args) {
+                  _handleAuthResult(args);
+                  return null;
+                },
+              );
+              controller.addJavaScriptHandler(
+                handlerName: 'appReady',
+                callback: (args) {
+                  _nativePhoneBridge.onWebAppReady();
+                  if (mounted) {
+                    setState(() => _ready = true);
+                  }
+                  return null;
+                },
+              );
+              controller.addJavaScriptHandler(
+                handlerName: 'incomingMessage',
+                callback: (args) async {
+                  await _nativePhoneBridge.showIncomingMessage(_payloadFromArgs(args));
+                  return null;
+                },
+              );
+              controller.addJavaScriptHandler(
+                handlerName: 'incomingCall',
+                callback: (args) async {
+                  await _nativePhoneBridge.showIncomingCall(_payloadFromArgs(args));
+                  return null;
+                },
+              );
+              controller.addJavaScriptHandler(
+                handlerName: 'callConnected',
+                callback: (args) async {
+                  await _nativePhoneBridge.markCallConnected(_payloadFromArgs(args));
+                  return null;
+                },
+              );
+              controller.addJavaScriptHandler(
+                handlerName: 'callEnded',
+                callback: (args) async {
+                  await _nativePhoneBridge.endCall(_payloadFromArgs(args));
+                  return null;
+                },
+              );
+            },
+            onLoadStop: (controller, url) async {
+              await _bootstrap();
+            },
+            onPermissionRequest: (controller, request) async {
+              return PermissionResponse(
+                resources: request.resources,
+                action: PermissionResponseAction.GRANT,
+              );
+            },
+            onConsoleMessage: (controller, message) {
+              debugPrint('WebView: ${message.message}');
+            },
+          ),
+          if (!_ready)
+            ColoredBox(
+              color: const Color(0xFFF2F7F5),
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const SizedBox(
+                        width: 42,
+                        height: 42,
+                        child: CircularProgressIndicator(strokeWidth: 3),
+                      ),
+                      const SizedBox(height: 18),
+                      Text(
+                        _statusText,
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                          color: const Color(0xFF111B21),
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _LoginBackground extends StatelessWidget {
+  const _LoginBackground();
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        const DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [Color(0xFFE7FFF4), Color(0xFFF2F7F5)],
+            ),
+          ),
+        ),
+        Positioned(
+          top: -80,
+          left: -40,
+          child: Container(
+            width: 220,
+            height: 220,
+            decoration: const BoxDecoration(
+              color: Color(0x3325D366),
+              shape: BoxShape.circle,
+            ),
+          ),
+        ),
+        Positioned(
+          right: -70,
+          bottom: -50,
+          child: Container(
+            width: 240,
+            height: 240,
+            decoration: const BoxDecoration(
+              color: Color(0x22128C7E),
+              shape: BoxShape.circle,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+

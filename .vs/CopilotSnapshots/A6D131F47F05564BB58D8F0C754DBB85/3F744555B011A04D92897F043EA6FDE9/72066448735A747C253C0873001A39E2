@@ -1,0 +1,598 @@
+﻿import 'dart:convert';
+
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/material.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:http/http.dart' as http;
+import 'package:permission_handler/permission_handler.dart';
+
+InAppLocalhostServer? _localhostServer;
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  if (!kIsWeb) {
+    _localhostServer = InAppLocalhostServer(port: 8080);
+    await _localhostServer!.start();
+  }
+
+  runApp(const ChattyFriendsApp());
+}
+
+class ChattyFriendsApp extends StatelessWidget {
+  const ChattyFriendsApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'ChattyFriends',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF25D366)),
+        scaffoldBackgroundColor: const Color(0xFFF2F7F5),
+        useMaterial3: true,
+      ),
+      home: const NativeLoginPage(),
+    );
+  }
+}
+
+class _ChattyConfig {
+  static const supabaseUrl = 'https://xijruxarvehmlvzbnffn.supabase.co';
+  static const supabaseAnon =
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhpanJ1eGFydmVobWx2emJuZmZuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI2NTIyMjgsImV4cCI6MjA4ODIyODIyOH0.CvoIzfgzZLkCa9Tuix4U4sP0fp1oJjEwjn-Yuczo3Yk';
+  static const appVersion = 'v3.3 · 03/10/2026';
+  static const changelog = [
+    'Manejo de mensajes: ahora se pueden editar y eliminar.',
+    'Mejoras en llamadas y llamadas grupales.',
+    'App móvil en desarrollo para iPhone y Android.',
+  ];
+}
+
+class NativeLoginPage extends StatefulWidget {
+  const NativeLoginPage({super.key});
+
+  @override
+  State<NativeLoginPage> createState() => _NativeLoginPageState();
+}
+
+class _NativeLoginPageState extends State<NativeLoginPage> {
+  final _userController = TextEditingController();
+  final _passwordController = TextEditingController();
+  bool _isSubmitting = false;
+  String? _errorText;
+
+  @override
+  void dispose() {
+    _userController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    FocusScope.of(context).unfocus();
+    final username = _userController.text.trim();
+    final password = _passwordController.text;
+
+    if (username.isEmpty || password.isEmpty) {
+      setState(() => _errorText = 'Completa usuario y contraseña.');
+      return;
+    }
+
+    setState(() {
+      _isSubmitting = true;
+      _errorText = null;
+    });
+
+    try {
+      final valid = await _validateCredentials(username, password);
+      if (!mounted) return;
+
+      if (!valid) {
+        setState(() => _errorText = 'Usuario o contraseña incorrectos.');
+        return;
+      }
+
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => NativeUpdatesPage(
+            username: username,
+            password: password,
+          ),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _errorText = 'No se pudo conectar con ChattyFriends.');
+    } finally {
+      if (mounted) {
+        setState(() => _isSubmitting = false);
+      }
+    }
+  }
+
+  Future<bool> _validateCredentials(String username, String password) async {
+    final uri = Uri.parse('${_ChattyConfig.supabaseUrl}/rest/v1/profiles').replace(
+      queryParameters: {
+        'select': 'id',
+        'username': 'eq.$username',
+        'clave': 'eq.$password',
+        'limit': '1',
+      },
+    );
+
+    final response = await http.get(
+      uri,
+      headers: {
+        'apikey': _ChattyConfig.supabaseAnon,
+        'Authorization': 'Bearer ${_ChattyConfig.supabaseAnon}',
+        'Accept': 'application/json',
+      },
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception('Auth error ${response.statusCode}');
+    }
+
+    final decoded = jsonDecode(response.body);
+    return decoded is List && decoded.isNotEmpty;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Stack(
+        children: [
+          const _LoginBackground(),
+          SafeArea(
+            child: Center(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(24),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 420),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(32),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color(0x14000000),
+                          blurRadius: 30,
+                          offset: Offset(0, 14),
+                        ),
+                      ],
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(28),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Container(
+                            width: 72,
+                            height: 72,
+                            decoration: const BoxDecoration(
+                              color: Color(0xFF25D366),
+                              shape: BoxShape.circle,
+                            ),
+                            alignment: Alignment.center,
+                            child: const Icon(
+                              Icons.chat_bubble_rounded,
+                              color: Colors.white,
+                              size: 34,
+                            ),
+                          ),
+                          const SizedBox(height: 20),
+                          Text(
+                            'ChattyFriends',
+                            textAlign: TextAlign.center,
+                            style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                              fontWeight: FontWeight.w800,
+                              color: const Color(0xFF111B21),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Login nativo para iOS y Android.',
+                            textAlign: TextAlign.center,
+                            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                              color: const Color(0xFF667781),
+                            ),
+                          ),
+                          const SizedBox(height: 24),
+                          TextField(
+                            controller: _userController,
+                            textInputAction: TextInputAction.next,
+                            decoration: const InputDecoration(
+                              labelText: 'Usuario',
+                              prefixIcon: Icon(Icons.person_outline),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.all(Radius.circular(18)),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          TextField(
+                            controller: _passwordController,
+                            obscureText: true,
+                            onSubmitted: (_) => _submit(),
+                            decoration: const InputDecoration(
+                              labelText: 'Contraseña',
+                              prefixIcon: Icon(Icons.lock_outline),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.all(Radius.circular(18)),
+                              ),
+                            ),
+                          ),
+                          if (_errorText != null) ...[
+                            const SizedBox(height: 14),
+                            Text(
+                              _errorText!,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                color: Color(0xFFC62828),
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 20),
+                          FilledButton(
+                            onPressed: _isSubmitting ? null : _submit,
+                            style: FilledButton.styleFrom(
+                              backgroundColor: const Color(0xFF128C7E),
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 16),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(18),
+                              ),
+                            ),
+                            child: _isSubmitting
+                                ? const SizedBox(
+                                    width: 22,
+                                    height: 22,
+                                    child: CircularProgressIndicator(strokeWidth: 2.4),
+                                  )
+                                : const Text('Iniciar sesión'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class NativeUpdatesPage extends StatelessWidget {
+  const NativeUpdatesPage({
+    super.key,
+    required this.username,
+    required this.password,
+  });
+
+  final String username;
+  final String password;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Align(
+                alignment: Alignment.centerLeft,
+                child: IconButton.filledTonal(
+                  onPressed: () => Navigator.of(context).pop(),
+                  icon: const Icon(Icons.arrow_back_rounded),
+                ),
+              ),
+              const SizedBox(height: 24),
+              Text(
+                'Novedades',
+                style: Theme.of(context).textTheme.headlineLarge?.copyWith(
+                  fontWeight: FontWeight.w800,
+                  color: const Color(0xFF111B21),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                _ChattyConfig.appVersion,
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  color: const Color(0xFF128C7E),
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 20),
+              ..._ChattyConfig.changelog.map(
+                (item) => Container(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  padding: const EdgeInsets.all(18),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(color: const Color(0xFFE3E8EA)),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        width: 40,
+                        height: 40,
+                        decoration: const BoxDecoration(
+                          color: Color(0xFFE8F5E9),
+                          shape: BoxShape.circle,
+                        ),
+                        alignment: Alignment.center,
+                        child: const Icon(
+                          Icons.done_rounded,
+                          color: Color(0xFF128C7E),
+                        ),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Text(
+                          item,
+                          style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                            height: 1.35,
+                            color: const Color(0xFF111B21),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const Spacer(),
+              FilledButton(
+                onPressed: () {
+                  Navigator.of(context).pushReplacement(
+                    MaterialPageRoute<void>(
+                      builder: (_) => ChatShellPage(
+                        username: username,
+                        password: password,
+                      ),
+                    ),
+                  );
+                },
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFF25D366),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 18),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                ),
+                child: const Text('Entrar al chat'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class ChatShellPage extends StatefulWidget {
+  const ChatShellPage({
+    super.key,
+    required this.username,
+    required this.password,
+  });
+
+  final String username;
+  final String password;
+
+  @override
+  State<ChatShellPage> createState() => _ChatShellPageState();
+}
+
+class _ChatShellPageState extends State<ChatShellPage> {
+  InAppWebViewController? _controller;
+  bool _bootstrapped = false;
+  bool _ready = false;
+  String _statusText = 'Conectando con ChattyFriends...';
+
+  WebUri get _initialUrl =>
+      kIsWeb ? WebUri('chat.html') : WebUri('http://localhost:8080/assets/chat.html');
+
+  @override
+  void initState() {
+    super.initState();
+    _requestRequiredPermissions();
+  }
+
+  Future<void> _requestRequiredPermissions() async {
+    if (kIsWeb) return;
+    await Permission.notification.request();
+    await Permission.microphone.request();
+  }
+
+  Future<void> _bootstrap() async {
+    if (_bootstrapped || _controller == null) return;
+    _bootstrapped = true;
+
+    final configJson = jsonEncode({
+      'managedByFlutter': true,
+      'skipVersionPopup': true,
+      'mobileShell': true,
+    });
+    final usernameJson = jsonEncode(widget.username);
+    final passwordJson = jsonEncode(widget.password);
+
+    await _controller!.evaluateJavascript(
+      source: 'window.ChattyNative && window.ChattyNative.configure($configJson);',
+    );
+
+    setState(() => _statusText = 'Iniciando sesión...');
+
+    await _controller!.evaluateJavascript(
+      source: 'window.ChattyNative && window.ChattyNative.login($usernameJson, $passwordJson);',
+    );
+  }
+
+  void _handleAuthResult(List<dynamic> args) {
+    final payload = args.isNotEmpty && args.first is Map
+        ? Map<String, dynamic>.from(args.first as Map)
+        : <String, dynamic>{};
+    final success = payload['success'] == true;
+
+    if (success) {
+      if (mounted) {
+        setState(() => _statusText = 'Cargando chats e historial...');
+      }
+      return;
+    }
+
+    final message = payload['message']?.toString() ?? 'No se pudo iniciar sesión.';
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute<void>(builder: (_) => const NativeLoginPage()),
+      (route) => false,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Stack(
+        children: [
+          InAppWebView(
+            initialUrlRequest: URLRequest(url: _initialUrl),
+            initialSettings: InAppWebViewSettings(
+              javaScriptEnabled: true,
+              mediaPlaybackRequiresUserGesture: false,
+              allowsInlineMediaPlayback: true,
+              domStorageEnabled: true,
+              databaseEnabled: true,
+              javaScriptCanOpenWindowsAutomatically: true,
+              supportMultipleWindows: true,
+              allowFileAccess: true,
+              allowContentAccess: true,
+              mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW,
+              useWideViewPort: false,
+              transparentBackground: true,
+            ),
+            onWebViewCreated: (controller) {
+              _controller = controller;
+              controller.addJavaScriptHandler(
+                handlerName: 'authResult',
+                callback: (args) {
+                  _handleAuthResult(args);
+                  return null;
+                },
+              );
+              controller.addJavaScriptHandler(
+                handlerName: 'appReady',
+                callback: (args) {
+                  if (mounted) {
+                    setState(() => _ready = true);
+                  }
+                  return null;
+                },
+              );
+            },
+            onLoadStop: (controller, url) async {
+              await _bootstrap();
+            },
+            onPermissionRequest: (controller, request) async {
+              return PermissionResponse(
+                resources: request.resources,
+                action: PermissionResponseAction.GRANT,
+              );
+            },
+            onConsoleMessage: (controller, message) {
+              debugPrint('WebView: ${message.message}');
+            },
+          ),
+          if (!_ready)
+            ColoredBox(
+              color: const Color(0xFFF2F7F5),
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const SizedBox(
+                        width: 42,
+                        height: 42,
+                        child: CircularProgressIndicator(strokeWidth: 3),
+                      ),
+                      const SizedBox(height: 18),
+                      Text(
+                        _statusText,
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                          color: const Color(0xFF111B21),
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _LoginBackground extends StatelessWidget {
+  const _LoginBackground();
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        const DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [Color(0xFFE7FFF4), Color(0xFFF2F7F5)],
+            ),
+          ),
+        ),
+        Positioned(
+          top: -80,
+          left: -40,
+          child: Container(
+            width: 220,
+            height: 220,
+            decoration: const BoxDecoration(
+              color: Color(0x3325D366),
+              shape: BoxShape.circle,
+            ),
+          ),
+        ),
+        Positioned(
+          right: -70,
+          bottom: -50,
+          child: Container(
+            width: 240,
+            height: 240,
+            decoration: const BoxDecoration(
+              color: Color(0x22128C7E),
+              shape: BoxShape.circle,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+

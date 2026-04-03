@@ -1,0 +1,568 @@
+﻿<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ChattyFriends</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; height: 100vh; }
+
+    /* ── LOGIN ── */
+    #login-screen {
+      display: flex; justify-content: center; align-items: center;
+      height: 100vh; background: #dbeefe;
+    }
+    .login-card {
+      background: #fff; border-radius: 12px; padding: 40px 36px;
+      width: 420px; box-shadow: 0 4px 20px rgba(0,0,0,.08);
+    }
+    .login-card h1 { font-size: 28px; margin-bottom: 28px; color: #222; }
+    .login-card input {
+      width: 100%; padding: 12px 14px; margin-bottom: 14px;
+      border: 1px solid #ccc; border-radius: 6px; font-size: 15px;
+      outline: none; transition: border .2s;
+    }
+    .login-card input:focus { border-color: #42a5f5; }
+    .btn-blue {
+      width: 100%; padding: 13px; border: none; border-radius: 6px;
+      background: #42a5f5; color: #fff; font-size: 16px; font-weight: 600;
+      cursor: pointer; margin-bottom: 10px; transition: background .2s;
+    }
+    .btn-blue:hover { background: #1e88e5; }
+
+    /* ── CHAT ── */
+    #chat-screen { display: none; height: 100vh; flex-direction: row; }
+
+    /* sidebar */
+    .sidebar {
+      width: 260px; background: #e8f5e9; padding: 20px;
+      display: flex; flex-direction: column; border-right: 1px solid #c8e6c9;
+    }
+    .sidebar h2 { font-size: 20px; margin-bottom: 14px; }
+    .sidebar input {
+      width: 100%; padding: 10px; border: 1px solid #bbb; border-radius: 6px;
+      font-size: 14px; margin-bottom: 10px; outline: none;
+    }
+    .btn-green {
+      width: 100%; padding: 11px; border: none; border-radius: 6px;
+      background: #43a047; color: #fff; font-size: 14px; font-weight: 600;
+      cursor: pointer; margin-bottom: 8px; transition: background .2s;
+    }
+    .btn-green:hover { background: #2e7d32; }
+    .btn-red {
+      width: 100%; padding: 11px; border: none; border-radius: 6px;
+      background: #ef5350; color: #fff; font-size: 14px; font-weight: 600;
+      cursor: pointer; margin-bottom: 14px; transition: background .2s;
+    }
+    .btn-red:hover { background: #c62828; }
+    .friends-list { flex: 1; overflow-y: auto; }
+    .friend-item {
+      padding: 10px 12px; margin-bottom: 6px; background: #fff;
+      border-radius: 6px; cursor: pointer; font-size: 14px;
+      transition: background .15s; display: flex; align-items: center; gap: 8px;
+    }
+    .friend-item:hover, .friend-item.active { background: #c8e6c9; }
+    .friend-item .avatar {
+      width: 32px; height: 32px; border-radius: 50%;
+      background: #7e57c2; color: #fff; display: flex;
+      justify-content: center; align-items: center; font-weight: 700; font-size: 14px;
+    }
+
+    /* chat area */
+    .chat-area { flex: 1; display: flex; flex-direction: column; }
+    .chat-header {
+      background: #43a047; color: #fff; padding: 16px 20px;
+      font-size: 20px; font-weight: 700;
+    }
+    .chat-messages {
+      flex: 1; padding: 20px; overflow-y: auto;
+      background: #fafafa; display: flex; flex-direction: column; gap: 10px;
+    }
+    .msg { max-width: 70%; padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.4; }
+    .msg.sent { align-self: flex-end; background: #42a5f5; color: #fff; border-bottom-right-radius: 2px; }
+    .msg.received { align-self: flex-start; background: #e0e0e0; color: #222; border-bottom-left-radius: 2px; }
+    .msg .meta { font-size: 11px; opacity: .7; margin-top: 4px; }
+
+    .chat-input {
+      display: flex; padding: 12px; background: #fff; border-top: 1px solid #ddd;
+    }
+    .chat-input input {
+      flex: 1; padding: 12px; border: 1px solid #ccc; border-radius: 6px;
+      font-size: 14px; outline: none; margin-right: 8px;
+    }
+    .chat-input button {
+      padding: 12px 24px; background: #43a047; color: #fff; border: none;
+      border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer;
+    }
+    .chat-input button:hover { background: #2e7d32; }
+    .no-chat { display: flex; justify-content: center; align-items: center; flex: 1; color: #999; font-size: 16px; }
+
+    .section-title { font-size: 16px; font-weight: 700; margin: 14px 0 8px; padding-top: 10px; border-top: 1px solid #c8e6c9; }
+    .group-item {
+      padding: 10px 12px; margin-bottom: 6px; background: #fff;
+      border-radius: 6px; cursor: pointer; font-size: 14px;
+      transition: background .15s;
+    }
+    .group-item:hover, .group-item.active { background: #c8e6c9; }
+    .group-item .group-name { font-weight: 600; }
+    .group-item .group-code { font-size: 11px; color: #888; font-family: monospace; }
+    .chat-header-sub { font-size: 12px; font-weight: 400; opacity: .85; font-family: monospace; margin-top: 2px; }
+
+    .unread-badge {
+      background: #ef5350; color: #fff; border-radius: 50%;
+      min-width: 20px; height: 20px; font-size: 11px; font-weight: 700;
+      display: flex; justify-content: center; align-items: center;
+      margin-left: auto; padding: 0 5px;
+    }
+    .unread-divider {
+      display: flex; align-items: center; gap: 10px; margin: 10px 0;
+      font-size: 12px; color: #ef5350; font-weight: 600;
+    }
+    .unread-divider::before, .unread-divider::after {
+      content: ''; flex: 1; height: 1px; background: #ef5350;
+    }
+    .read-dot {
+      display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      margin-left: 6px; vertical-align: middle;
+    }
+    .read-dot.read { background: #42a5f5; }
+    .read-dot.unread { background: #bbb; }
+
+    .toast {
+      position: fixed; top: 20px; right: 20px; padding: 12px 20px;
+      border-radius: 8px; color: #fff; font-size: 14px; z-index: 999;
+      animation: fadeIn .3s; display: none;
+    }
+    .toast.error { background: #ef5350; }
+    .toast.success { background: #43a047; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+  </style>
+</head>
+<body>
+
+<!-- Toast -->
+<div id="toast" class="toast"></div>
+
+<!-- ======== LOGIN ======== -->
+<div id="login-screen">
+  <div class="login-card">
+    <h1><em>ChattyFriends</em></h1>
+    <input id="auth-user" type="text" placeholder="Usuario" />
+    <input id="auth-pass" type="password" placeholder="Contrase&ntilde;a" />
+    <button class="btn-blue" onclick="register()">Registrarse</button>
+    <button class="btn-blue" onclick="login()">Iniciar Sesi&oacute;n</button>
+  </div>
+</div>
+
+<!-- ======== CHAT ======== -->
+<div id="chat-screen">
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <h2>Amigos</h2>
+    <input id="friend-input" type="text" placeholder="Nombre de usuario" />
+    <button class="btn-green" onclick="addFriend()">+ A&ntilde;adir Amigo</button>
+    <div class="friends-list" id="friends-list"></div>
+
+    <div class="section-title">Grupos</div>
+    <input id="group-name-input" type="text" placeholder="Nombre del grupo" />
+    <button class="btn-green" onclick="createGroup()">Crear Grupo</button>
+    <input id="group-code-input" type="text" placeholder="C&oacute;digo del grupo" style="margin-top:6px" />
+    <button class="btn-green" onclick="joinGroup()">Unirse a Grupo</button>
+    <div class="friends-list" id="groups-list"></div>
+
+    <button class="btn-red" onclick="logout()" style="margin-top:10px">Cerrar Sesi&oacute;n</button>
+  </div>
+
+  <!-- Chat -->
+  <div class="chat-area">
+    <div class="chat-header" id="chat-header">
+      <div id="chat-header-title">Chat Privado</div>
+      <div class="chat-header-sub" id="chat-header-code" style="display:none"></div>
+    </div>
+    <div class="chat-messages" id="chat-messages">
+      <div class="no-chat" id="no-chat">Selecciona un amigo para chatear</div>
+    </div>
+    <div class="chat-input">
+      <input id="msg-input" type="text" placeholder="Escribe un mensaje..." onkeydown="if(event.key==='Enter')sendMessage()" />
+      <button onclick="sendMessage()">Enviar</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  // -- Supabase init --
+  const SUPABASE_URL = 'https://xijruxarvehmlvzbnffn.supabase.co';
+  const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhpanJ1eGFydmVobWx2emJuZmZuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI2NTIyMjgsImV4cCI6MjA4ODIyODIyOH0.CvoIzfgzZLkCa9Tuix4U4sP0fp1oJjEwjn-Yuczo3Yk';
+  const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+
+  let currentUser = null;   // { id, username }
+  let activeFriend = null;  // { id, username }
+  let activeGroup = null;   // { id, name, code }
+  let chatMode = null;      // 'private' | 'group'
+  let msgSubscription = null;
+  let grpSubscription = null;
+  let lastReadMap = {};
+  let unreadCounts = {};
+  let prevLastRead = null;
+
+  function loadLastReadMap() {
+    try { lastReadMap = JSON.parse(localStorage.getItem('chatty_lr_' + currentUser.id) || '{}'); }
+    catch(e) { lastReadMap = {}; }
+  }
+  function saveLastReadMap() {
+    localStorage.setItem('chatty_lr_' + currentUser.id, JSON.stringify(lastReadMap));
+  }
+  async function computeUnreadCounts() {
+    unreadCounts = {};
+    var { data: privMsgs } = await sb.from('messages')
+      .select('sender_id, created_at').eq('receiver_id', currentUser.id);
+    if (privMsgs) {
+      privMsgs.forEach(function(m) {
+        var lr = lastReadMap['friend_' + m.sender_id] || '1970-01-01T00:00:00.000Z';
+        if (m.created_at > lr) unreadCounts['friend_' + m.sender_id] = (unreadCounts['friend_' + m.sender_id] || 0) + 1;
+      });
+    }
+    var { data: myGrps } = await sb.from('group_members')
+      .select('group_id').eq('user_id', currentUser.id);
+    if (myGrps && myGrps.length) {
+      var gids = myGrps.map(function(g) { return g.group_id; });
+      var { data: grpMsgs } = await sb.from('group_messages')
+        .select('group_id, created_at').in('group_id', gids).neq('sender_id', currentUser.id);
+      if (grpMsgs) {
+        grpMsgs.forEach(function(m) {
+          var lr = lastReadMap['group_' + m.group_id] || '1970-01-01T00:00:00.000Z';
+          if (m.created_at > lr) unreadCounts['group_' + m.group_id] = (unreadCounts['group_' + m.group_id] || 0) + 1;
+        });
+      }
+    }
+  }
+
+  // -- Helpers --
+  function toast(msg, type = 'error') {
+    const t = document.getElementById('toast');
+    t.textContent = msg; t.className = 'toast ' + type; t.style.display = 'block';
+    setTimeout(() => t.style.display = 'none', 3000);
+  }
+  function showScreen(name) {
+    document.getElementById('login-screen').style.display = name === 'login' ? 'flex' : 'none';
+    document.getElementById('chat-screen').style.display = name === 'chat' ? 'flex' : 'none';
+  }
+
+  // -- Auth (por tabla profiles) --
+  async function register() {
+    const username = document.getElementById('auth-user').value.trim();
+    const clave = document.getElementById('auth-pass').value;
+    if (!username || !clave) return toast('Completa todos los campos');
+
+    const { data: exists } = await sb.from('profiles').select('id').eq('username', username).maybeSingle();
+    if (exists) return toast('Ese usuario ya existe');
+
+    const { data, error } = await sb.from('profiles').insert({ username, clave }).select().single();
+    if (error) return toast(error.message);
+
+    toast('\u00A1Registro exitoso! Inicia sesi\u00F3n.', 'success');
+  }
+
+  async function login() {
+    const username = document.getElementById('auth-user').value.trim();
+    const clave = document.getElementById('auth-pass').value;
+    if (!username || !clave) return toast('Completa todos los campos');
+
+    const { data: profile, error } = await sb.from('profiles')
+      .select('*').eq('username', username).eq('clave', clave).maybeSingle();
+    if (error) return toast(error.message);
+    if (!profile) return toast('Usuario o contrase\u00F1a incorrectos');
+
+    currentUser = { id: profile.id, username: profile.username };
+    localStorage.setItem('chatty_user', JSON.stringify(currentUser));
+    loadLastReadMap();
+    await computeUnreadCounts();
+    showScreen('chat');
+    loadFriends();
+    loadGroups();
+    subscribeMessages();
+  }
+
+  function logout() {
+    currentUser = null; activeFriend = null; activeGroup = null; chatMode = null;
+    localStorage.removeItem('chatty_user');
+    if (msgSubscription) sb.removeChannel(msgSubscription);
+    if (grpSubscription) sb.removeChannel(grpSubscription);
+    showScreen('login');
+  }
+
+  // -- Restaurar sesion desde localStorage --
+  (async () => {
+    const saved = localStorage.getItem('chatty_user');
+    if (saved) {
+      currentUser = JSON.parse(saved);
+      loadLastReadMap();
+      await computeUnreadCounts();
+      showScreen('chat');
+      loadFriends();
+      loadGroups();
+      subscribeMessages();
+    }
+  })();
+
+  // -- Friends --
+  async function addFriend() {
+    const name = document.getElementById('friend-input').value.trim();
+    if (!name) return toast('Escribe un nombre de usuario');
+    if (name === currentUser.username) return toast('No puedes a\u00F1adirte a ti mismo');
+
+    const { data: friend, error } = await sb.from('profiles').select('id').eq('username', name).single();
+    if (error || !friend) return toast('Usuario no encontrado');
+
+    // check if already friends (either direction)
+    const { data: existing } = await sb.from('friends')
+      .select('id')
+      .or(`and(user_id.eq.${currentUser.id},friend_id.eq.${friend.id}),and(user_id.eq.${friend.id},friend_id.eq.${currentUser.id})`)
+      .maybeSingle();
+    if (existing) return toast('Ya es tu amigo');
+
+    // insert both directions
+    const { error: iErr } = await sb.from('friends').insert([
+      { user_id: currentUser.id, friend_id: friend.id },
+      { user_id: friend.id, friend_id: currentUser.id }
+    ]);
+    if (iErr) return toast(iErr.message);
+
+    document.getElementById('friend-input').value = '';
+    toast('Amigo a\u00F1adido', 'success');
+    loadFriends();
+  }
+
+  async function loadFriends() {
+    const { data, error } = await sb.from('friends')
+      .select('friend_id, profiles!friends_friend_id_fkey(username)')
+      .eq('user_id', currentUser.id);
+
+    const list = document.getElementById('friends-list');
+    list.innerHTML = '';
+    if (!data || !data.length) { list.innerHTML = '<p style="color:#888;font-size:13px;margin-top:8px">Sin amigos a&uacute;n</p>'; return; }
+
+    data.forEach(f => {
+      const uname = f.profiles?.username || f.friend_id;
+      const count = unreadCounts['friend_' + f.friend_id] || 0;
+      const badge = count > 0 ? '<div class="unread-badge">' + count + '</div>' : '';
+      const div = document.createElement('div');
+      div.className = 'friend-item' + (activeFriend && activeFriend.id === f.friend_id ? ' active' : '');
+      div.innerHTML = '<div class="avatar">' + uname[0].toUpperCase() + '</div><span>' + uname + '</span>' + badge;
+      div.onclick = () => openChat(f.friend_id, uname);
+      list.appendChild(div);
+    });
+  }
+
+  // -- Chat --
+  function openChat(friendId, friendName) {
+    var key = 'friend_' + friendId;
+    prevLastRead = lastReadMap[key] || null;
+    lastReadMap[key] = new Date().toISOString();
+    saveLastReadMap();
+    delete unreadCounts[key];
+    activeFriend = { id: friendId, username: friendName };
+    activeGroup = null;
+    chatMode = 'private';
+    document.getElementById('chat-header-title').textContent = 'Chat con ' + friendName;
+    document.getElementById('chat-header-code').style.display = 'none';
+    document.getElementById('no-chat').style.display = 'none';
+    loadFriends();
+    loadGroups();
+    loadMessages();
+  }
+
+  function openGroupChat(groupId, groupName, groupCode) {
+    var key = 'group_' + groupId;
+    prevLastRead = lastReadMap[key] || null;
+    lastReadMap[key] = new Date().toISOString();
+    saveLastReadMap();
+    delete unreadCounts[key];
+    activeGroup = { id: groupId, name: groupName, code: groupCode };
+    activeFriend = null;
+    chatMode = 'group';
+    document.getElementById('chat-header-title').textContent = groupName;
+    document.getElementById('chat-header-code').textContent = 'C\u00F3digo: ' + groupCode;
+    document.getElementById('chat-header-code').style.display = 'block';
+    document.getElementById('no-chat').style.display = 'none';
+    loadFriends();
+    loadGroups();
+    loadGroupMessages();
+  }
+
+  async function loadMessages() {
+    if (!activeFriend) return;
+    const { data } = await sb.from('messages').select('*')
+      .or(`and(sender_id.eq.${currentUser.id},receiver_id.eq.${activeFriend.id}),and(sender_id.eq.${activeFriend.id},receiver_id.eq.${currentUser.id})`)
+      .order('created_at', { ascending: true });
+
+    renderMessages(data || []);
+  }
+
+  function renderMessages(msgs) {
+    const container = document.getElementById('chat-messages');
+    container.innerHTML = '';
+    if (!msgs.length) {
+      container.innerHTML = '<div class="no-chat">No hay mensajes a\u00FAn. \u00A1Saluda!</div>';
+      return;
+    }
+    msgs.forEach(m => {
+      const div = document.createElement('div');
+      const sent = m.sender_id === currentUser.id;
+      div.className = 'msg ' + (sent ? 'sent' : 'received');
+      const time = new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      div.innerHTML = `${m.content}<div class="meta">${time}</div>`;
+      container.appendChild(div);
+    });
+    container.scrollTop = container.scrollHeight;
+  }
+
+  async function sendMessage() {
+    if (chatMode === 'group') return sendGroupMessage();
+    if (!activeFriend) return toast('Selecciona un amigo primero');
+    const input = document.getElementById('msg-input');
+    const text = input.value.trim();
+    if (!text) return;
+
+    const { error } = await sb.from('messages').insert({
+      sender_id: currentUser.id,
+      receiver_id: activeFriend.id,
+      content: text
+    });
+    if (error) return toast(error.message);
+    input.value = '';
+    loadMessages();
+  }
+
+  // -- Groups --
+  function generateCode() {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let code = '';
+    for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+    return code;
+  }
+
+  async function createGroup() {
+    const name = document.getElementById('group-name-input').value.trim();
+    if (!name) return toast('Escribe un nombre para el grupo');
+
+    const code = generateCode();
+    const { data: group, error } = await sb.from('groups')
+      .insert({ name, code, created_by: currentUser.id }).select().single();
+    if (error) return toast(error.message);
+
+    await sb.from('group_members').insert({ group_id: group.id, user_id: currentUser.id });
+
+    document.getElementById('group-name-input').value = '';
+    toast('Grupo creado! C\u00F3digo: ' + code, 'success');
+    loadGroups();
+  }
+
+  async function joinGroup() {
+    const code = document.getElementById('group-code-input').value.trim().toUpperCase();
+    if (!code) return toast('Escribe el c\u00F3digo del grupo');
+
+    const { data: group, error } = await sb.from('groups').select('*').eq('code', code).maybeSingle();
+    if (error || !group) return toast('Grupo no encontrado');
+
+    const { data: already } = await sb.from('group_members')
+      .select('id').eq('group_id', group.id).eq('user_id', currentUser.id).maybeSingle();
+    if (already) return toast('Ya eres miembro de este grupo');
+
+    const { error: jErr } = await sb.from('group_members')
+      .insert({ group_id: group.id, user_id: currentUser.id });
+    if (jErr) return toast(jErr.message);
+
+    document.getElementById('group-code-input').value = '';
+    toast('Te uniste a ' + group.name, 'success');
+    loadGroups();
+  }
+
+  async function loadGroups() {
+    const { data, error } = await sb.from('group_members')
+      .select('group_id, groups(id, name, code)')
+      .eq('user_id', currentUser.id);
+
+    const list = document.getElementById('groups-list');
+    list.innerHTML = '';
+    if (!data || !data.length) {
+      list.innerHTML = '<p style="color:#888;font-size:13px;margin-top:8px">Sin grupos a&uacute;n</p>';
+      return;
+    }
+
+    data.forEach(gm => {
+      const g = gm.groups;
+      if (!g) return;
+      const div = document.createElement('div');
+      div.className = 'group-item' + (activeGroup && activeGroup.id === g.id ? ' active' : '');
+      div.innerHTML = '<div class="group-name">' + g.name + '</div><div class="group-code">' + g.code + '</div>';
+      div.onclick = () => openGroupChat(g.id, g.name, g.code);
+      list.appendChild(div);
+    });
+  }
+
+  async function loadGroupMessages() {
+    if (!activeGroup) return;
+    const { data } = await sb.from('group_messages')
+      .select('*, profiles(username)')
+      .eq('group_id', activeGroup.id)
+      .order('created_at', { ascending: true });
+
+    renderGroupMessages(data || []);
+  }
+
+  function renderGroupMessages(msgs) {
+    const container = document.getElementById('chat-messages');
+    container.innerHTML = '';
+    if (!msgs.length) {
+      container.innerHTML = '<div class="no-chat">No hay mensajes a\u00FAn. \u00A1Saluda!</div>';
+      return;
+    }
+    msgs.forEach(m => {
+      const div = document.createElement('div');
+      const sent = m.sender_id === currentUser.id;
+      div.className = 'msg ' + (sent ? 'sent' : 'received');
+      const time = new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const sender = sent ? '' : '<strong>' + (m.profiles?.username || '?') + '</strong><br>';
+      div.innerHTML = sender + m.content + '<div class="meta">' + time + '</div>';
+      container.appendChild(div);
+    });
+    container.scrollTop = container.scrollHeight;
+  }
+
+  async function sendGroupMessage() {
+    if (!activeGroup) return;
+    const input = document.getElementById('msg-input');
+    const text = input.value.trim();
+    if (!text) return;
+
+    const { error } = await sb.from('group_messages').insert({
+      group_id: activeGroup.id,
+      sender_id: currentUser.id,
+      content: text
+    });
+    if (error) return toast(error.message);
+    input.value = '';
+    loadGroupMessages();
+  }
+
+  // -- Realtime --
+  function subscribeMessages() {
+    if (msgSubscription) sb.removeChannel(msgSubscription);
+    msgSubscription = sb.channel('chat-realtime')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, payload => {
+        const m = payload.new;
+        // if message involves current conversation, reload
+        if (activeFriend &&
+          ((m.sender_id === currentUser.id && m.receiver_id === activeFriend.id) ||
+           (m.sender_id === activeFriend.id && m.receiver_id === currentUser.id))) {
+          loadMessages();
+        }
+      })
+      .subscribe();
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,80 @@
+﻿import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/material.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+
+InAppLocalhostServer? _localhostServer;
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  if (!kIsWeb) {
+    _localhostServer = InAppLocalhostServer(port: 8080);
+    await _localhostServer!.start();
+  }
+
+  runApp(const ChattyFriendsApp());
+}
+
+class ChattyFriendsApp extends StatelessWidget {
+  const ChattyFriendsApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'ChattyFriends',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1b66c9)),
+      ),
+      home: const ChatScreen(),
+    );
+  }
+}
+
+class ChatScreen extends StatefulWidget {
+  const ChatScreen({super.key});
+
+  @override
+  State<ChatScreen> createState() => _ChatScreenState();
+}
+
+class _ChatScreenState extends State<ChatScreen> {
+  WebUri get _initialUrl => kIsWeb
+      ? WebUri('chat.html')
+      : WebUri('http://localhost:8080/assets/chat.html');
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: InAppWebView(
+        initialUrlRequest: URLRequest(url: _initialUrl),
+        initialSettings: InAppWebViewSettings(
+          javaScriptEnabled: true,
+          mediaPlaybackRequiresUserGesture: false,
+          allowsInlineMediaPlayback: true,
+          domStorageEnabled: true,
+          databaseEnabled: true,
+          javaScriptCanOpenWindowsAutomatically: true,
+          supportMultipleWindows: true,
+          allowFileAccess: true,
+          allowContentAccess: true,
+          mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW,
+          useWideViewPort: false,
+        ),
+        onWebViewCreated: (controller) {
+          // Controller available for advanced navigation if needed
+        },
+        onPermissionRequest: (controller, request) async {
+          return PermissionResponse(
+            resources: request.resources,
+            action: PermissionResponseAction.GRANT,
+          );
+        },
+        onConsoleMessage: (controller, message) {
+          debugPrint('WebView: ${message.message}');
+        },
+      ),
+    );
+  }
+}
+

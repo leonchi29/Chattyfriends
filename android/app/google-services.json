@@ -1,0 +1,39 @@
+{
+  "project_info": {
+    "project_number": "534800192181",
+    "project_id": "chatty-friends-51890",
+    "storage_bucket": "chatty-friends-51890.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:534800192181:android:50df0c8ee079d07bad24fc",
+        "android_client_info": {
+          "package_name": "com.app.chattyfriends"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "534800192181-46qmdv7q72i8ajj5rdb14ja5bpue65tr.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDSJ1jruyLCXDI1OOd-W45mgUtludbGSTI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "534800192181-1k43oahfdcmhn8c7lep1rl44k3du4vba.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
