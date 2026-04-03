@@ -118,7 +118,7 @@
     .avatar { width: 40px; height: 40px; border-radius: 50%; background: #4ba3f1; color: white; display: flex; align-items: center; justify-content: center; font-weight: bold; }
 
     /* CHAT AREA */
-    .chat-area { flex: 1; min-width:0; min-height:0; display: flex; flex-direction: column; }
+    .chat-area { flex: 1; min-width:0; min-height:0; display: flex; flex-direction: column; position:relative; }
     .chat-messages { flex: 1; min-height:0; padding: 20px; overflow-y: auto; background: #f9f9f9; display: flex; flex-direction: column; gap: 10px; }
     .msg { max-width: 70%; padding: 12px; border-radius: 15px; font-size: 15px; word-break: break-word; }
     .msg.sent { align-self: flex-end; background: #1b66c9; color: #fff; }
@@ -156,6 +156,98 @@
     .audio-compose-actions { display:flex; gap:8px; }
     .btn-audio-send { background:#1b66c9; color:#fff; border:none; border-radius:18px; padding:8px 14px; cursor:pointer; }
     .btn-audio-delete { background:#f44336; color:#fff; border:none; border-radius:18px; padding:8px 14px; cursor:pointer; }
+    .clip-panel {
+      display:none;
+      position:absolute;
+      inset:0;
+      z-index:20;
+      background:#0f1722;
+      color:#fff;
+      padding:10px;
+      box-sizing:border-box;
+      flex-direction:column;
+      gap:10px;
+    }
+    .clip-panel.visible { display:flex; }
+    .clip-top { display:flex; gap:8px; justify-content:space-between; }
+    .clip-top-left, .clip-top-right { display:flex; gap:8px; }
+    .clip-btn {
+      border:none;
+      border-radius:10px;
+      background:#1f2d40;
+      color:#fff;
+      padding:8px 12px;
+      font-size:13px;
+      cursor:pointer;
+      font-weight:700;
+    }
+    .clip-btn.warn { background:#2f465f; }
+    .clip-preview-wrap {
+      position:relative;
+      flex:1;
+      min-height:180px;
+      border-radius:14px;
+      overflow:hidden;
+      background:#000;
+      border:1px solid #213147;
+    }
+    .clip-preview-video { width:100%; height:100%; object-fit:cover; background:#000; }
+    .clip-record-dot {
+      position:absolute;
+      top:10px;
+      left:10px;
+      display:none;
+      width:10px;
+      height:10px;
+      border-radius:50%;
+      background:#f44336;
+      box-shadow:0 0 0 3px rgba(244,67,54,.25);
+      animation:gcPulse 1s infinite;
+    }
+    .clip-record-dot.visible { display:block; }
+    .clip-bottom { display:flex; justify-content:center; }
+    .clip-capture-btn {
+      width:84px;
+      height:84px;
+      border-radius:50%;
+      border:4px solid #fff;
+      background:#1b66c9;
+      color:#fff;
+      font-weight:700;
+      cursor:pointer;
+    }
+    .clip-capture-btn.recording { background:#f44336; }
+    .clip-recent-bar {
+      display:flex;
+      gap:8px;
+      overflow-x:auto;
+      padding:2px 0 4px;
+      min-height:64px;
+    }
+    .clip-recent-item {
+      flex:0 0 auto;
+      width:72px;
+      height:58px;
+      border:none;
+      border-radius:10px;
+      overflow:hidden;
+      background:#111;
+      padding:0;
+      cursor:pointer;
+      position:relative;
+      border:1px solid #2f435a;
+    }
+    .clip-recent-item img, .clip-recent-item video {
+      width:100%;
+      height:100%;
+      object-fit:cover;
+      display:block;
+    }
+    .clip-recent-empty {
+      color:#9bb0c7;
+      font-size:12px;
+      padding:4px 0;
+    }
     .msg .msg-gif, .msg .msg-sticker { max-width:220px; border-radius:12px; display:block; }
     .msg .msg-sticker { background:#fff; }
 
@@ -494,10 +586,32 @@
         <button class="btn-audio-delete" onclick="discardRecordedAudio()">Borrar</button>
       </div>
     </div>
+    <div id="clip-panel" class="clip-panel">
+      <div class="clip-top">
+        <div class="clip-top-left">
+          <button class="clip-btn" onclick="closeClipPanel()">Atras</button>
+          <button class="clip-btn" onclick="flipClipCamera()">Voltear</button>
+        </div>
+        <div class="clip-top-right">
+          <button class="clip-btn warn" id="clip-mode-btn" onclick="toggleClipCaptureMode()">Modo foto</button>
+          <button class="clip-btn" onclick="openClipGallery()">Galeria</button>
+          <button class="clip-btn" onclick="openAnyFilePicker()">Archivo</button>
+        </div>
+      </div>
+      <div class="clip-preview-wrap">
+        <video id="clip-preview-video" class="clip-preview-video" autoplay playsinline muted></video>
+        <div id="clip-record-dot" class="clip-record-dot"></div>
+      </div>
+      <div class="clip-bottom">
+        <button id="clip-capture-btn" class="clip-capture-btn" onclick="captureClipAction()">Capturar</button>
+      </div>
+      <div id="clip-recent-bar" class="clip-recent-bar"></div>
+    </div>
     <div class="chat-input-bar">
       <button class="btn-clip" id="btn-clip" onclick="onClipClick()" title="Enviar archivo">&#x1F4CE;</button>
       <button class="btn-mic" id="btn-mic" onclick="toggleAudioRecord()" title="Grabar audio">&#x1F3A4;</button>
       <input id="file-input" type="file" style="display:none" onchange="sendFile(this)" />
+      <input id="file-input-gallery" type="file" style="display:none" onchange="sendFile(this)" accept="image/*,video/*" multiple />
       <input id="msg-input" type="text" placeholder="Escribe un mensaje..." onkeydown="if(event.key==='Enter')sendMessage()" />
       <button id="btn-send-msg" onclick="sendMessage()">Enviar</button>
     </div>
@@ -505,6 +619,12 @@
 </div>
 
 <script>
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.getRegistrations().then(function(regs) {
+      regs.forEach(function(reg) { reg.unregister(); });
+    }).catch(function() {});
+  }
+
   const SUPABASE_URL = 'https://xijruxarvehmlvzbnffn.supabase.co';
   const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhpanJ1eGFydmVobWx2emJuZmZuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI2NTIyMjgsImV4cCI6MjA4ODIyODIyOH0.CvoIzfgzZLkCa9Tuix4U4sP0fp1oJjEwjn-Yuczo3Yk';
   const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
@@ -540,6 +660,13 @@
     private: {},
     groups: {}
   };
+  var clipPanelStream = null;
+  var clipCameraFacing = 'environment';
+  var clipCaptureMode = 'photo';
+  var clipRecorder = null;
+  var clipRecorderChunks = [];
+  var clipRecording = false;
+  var clipRecentItems = [];
 
   function _beep(freq, durationMs) {
     try {
@@ -1082,9 +1209,234 @@
     alert('Anda a 6B en el colegio Lincoln a pedirle la clave a Carlos Trujillo, creador de ChattyFriends.');
   }
 
+  function canSendMediaInCurrentChat(showToastMessage) {
+    if (!chatMode) {
+      if (showToastMessage) toast('Selecciona un chat primero');
+      return false;
+    }
+    if (chatMode === 'private' && activeFriend && BLOCKED_CHAT_BOT_IDS.indexOf(activeFriend.id) > -1) {
+      if (showToastMessage) toast('A este bot no se le puede enviar nada');
+      return false;
+    }
+    if (chatMode === 'private' && activeFriend && activeFriend.id === BOT_ID) {
+      if (showToastMessage) toast('A la IA solo se le puede escribir texto');
+      return false;
+    }
+    return true;
+  }
+
   function onClipClick() {
-    if (!chatMode) { toast('Selecciona un chat primero'); return; }
+    if (!canSendMediaInCurrentChat(true)) return;
+    openClipGallery();
+  }
+
+  function openAnyFilePicker() {
+    if (!canSendMediaInCurrentChat(true)) return;
     document.getElementById('file-input').click();
+  }
+
+  function openClipGallery() {
+    if (!canSendMediaInCurrentChat(true)) return;
+    document.getElementById('file-input-gallery').click();
+  }
+
+  async function openClipPanel() {
+    var panel = document.getElementById('clip-panel');
+    if (!panel) return;
+    panel.classList.add('visible');
+    updateClipModeUI();
+    renderClipRecentBar();
+    await startClipCameraPreview();
+  }
+
+  function closeClipPanel() {
+    var panel = document.getElementById('clip-panel');
+    if (panel) panel.classList.remove('visible');
+    stopClipRecorder(false);
+    stopClipCameraPreview();
+  }
+
+  function stopClipCameraPreview() {
+    if (clipPanelStream) {
+      clipPanelStream.getTracks().forEach(function(t) { t.stop(); });
+      clipPanelStream = null;
+    }
+    var video = document.getElementById('clip-preview-video');
+    if (video) video.srcObject = null;
+  }
+
+  async function startClipCameraPreview() {
+    if (!canSendMediaInCurrentChat(true)) return;
+    stopClipCameraPreview();
+    var wantsAudio = clipCaptureMode === 'video';
+    var tries = [
+      { video: { facingMode: { ideal: clipCameraFacing } }, audio: wantsAudio },
+      { video: { facingMode: clipCameraFacing }, audio: wantsAudio },
+      { video: true, audio: wantsAudio }
+    ];
+    var err = null;
+    for (var i = 0; i < tries.length; i++) {
+      try {
+        clipPanelStream = await navigator.mediaDevices.getUserMedia(tries[i]);
+        break;
+      } catch (e) {
+        err = e;
+      }
+    }
+    if (!clipPanelStream) {
+      toast(mediaPermissionMessage(err, 'video') + '. Permite camara/microfono y vuelve a intentar.');
+      return;
+    }
+    var video = document.getElementById('clip-preview-video');
+    if (!video) return;
+    video.srcObject = clipPanelStream;
+    try { await video.play(); } catch (_) {}
+  }
+
+  async function flipClipCamera() {
+    clipCameraFacing = clipCameraFacing === 'user' ? 'environment' : 'user';
+    await startClipCameraPreview();
+  }
+
+  async function toggleClipCaptureMode() {
+    if (clipRecording) return;
+    clipCaptureMode = clipCaptureMode === 'photo' ? 'video' : 'photo';
+    updateClipModeUI();
+    await startClipCameraPreview();
+  }
+
+  function updateClipModeUI() {
+    var modeBtn = document.getElementById('clip-mode-btn');
+    var capBtn = document.getElementById('clip-capture-btn');
+    var dot = document.getElementById('clip-record-dot');
+    if (modeBtn) modeBtn.textContent = clipCaptureMode === 'photo' ? 'Modo foto' : 'Modo video';
+    if (capBtn) {
+      capBtn.textContent = clipCaptureMode === 'photo' ? 'Capturar' : (clipRecording ? 'Detener' : 'Grabar');
+      if (clipRecording) capBtn.classList.add('recording');
+      else capBtn.classList.remove('recording');
+    }
+    if (dot) {
+      if (clipRecording) dot.classList.add('visible');
+      else dot.classList.remove('visible');
+    }
+  }
+
+  async function captureClipAction() {
+    if (!canSendMediaInCurrentChat(true)) return;
+    if (!clipPanelStream) {
+      await startClipCameraPreview();
+      if (!clipPanelStream) return;
+    }
+    if (clipCaptureMode === 'photo') {
+      await captureClipPhoto();
+      return;
+    }
+    if (!clipRecording) startClipRecorder();
+    else stopClipRecorder(true);
+  }
+
+  function startClipRecorder() {
+    if (!clipPanelStream) return;
+    clipRecorderChunks = [];
+    var options = {};
+    if (MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')) options.mimeType = 'video/webm;codecs=vp8,opus';
+    else if (MediaRecorder.isTypeSupported('video/webm')) options.mimeType = 'video/webm';
+    clipRecorder = new MediaRecorder(clipPanelStream, options);
+    clipRecorder.ondataavailable = function(ev) {
+      if (ev.data && ev.data.size > 0) clipRecorderChunks.push(ev.data);
+    };
+    clipRecorder.onstop = async function() {
+      if (!clipRecorderChunks.length) return;
+      var blob = new Blob(clipRecorderChunks, { type: clipRecorder.mimeType || 'video/webm' });
+      var file = new File([blob], 'video_' + Date.now() + '.webm', { type: blob.type });
+      addClipRecent(file);
+      await sendPickedFiles([file]);
+      closeClipPanel();
+    };
+    clipRecorder.start();
+    clipRecording = true;
+    updateClipModeUI();
+  }
+
+  function stopClipRecorder(sendAfterStop) {
+    if (!clipRecorder || clipRecorder.state !== 'recording') {
+      clipRecording = false;
+      updateClipModeUI();
+      return;
+    }
+    clipRecording = false;
+    updateClipModeUI();
+    if (sendAfterStop) clipRecorder.stop();
+    else {
+      clipRecorder.ondataavailable = null;
+      clipRecorder.onstop = null;
+      clipRecorder.stop();
+    }
+  }
+
+  async function captureClipPhoto() {
+    var video = document.getElementById('clip-preview-video');
+    if (!video || !video.videoWidth || !video.videoHeight) {
+      toast('Espera a que cargue la camara');
+      return;
+    }
+    var canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    var ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    var blob = await new Promise(function(resolve) {
+      canvas.toBlob(function(b) { resolve(b); }, 'image/jpeg', 0.92);
+    });
+    if (!blob) {
+      toast('No se pudo capturar la foto');
+      return;
+    }
+    var file = new File([blob], 'foto_' + Date.now() + '.jpg', { type: 'image/jpeg' });
+    addClipRecent(file);
+    await sendPickedFiles([file]);
+    closeClipPanel();
+  }
+
+  function addClipRecent(file) {
+    if (!file || !file.type) return;
+    if (!(file.type.indexOf('image/') === 0 || file.type.indexOf('video/') === 0)) return;
+    var url = URL.createObjectURL(file);
+    clipRecentItems.unshift({ file: file, url: url, type: file.type, name: file.name || 'archivo' });
+    if (clipRecentItems.length > 14) {
+      var removed = clipRecentItems.pop();
+      if (removed && removed.url) URL.revokeObjectURL(removed.url);
+    }
+    renderClipRecentBar();
+  }
+
+  function renderClipRecentBar() {
+    var bar = document.getElementById('clip-recent-bar');
+    if (!bar) return;
+    bar.innerHTML = '';
+    if (!clipRecentItems.length) {
+      bar.innerHTML = '<div class="clip-recent-empty">Aqui veras fotos y videos recientes.</div>';
+      return;
+    }
+    clipRecentItems.forEach(function(item, idx) {
+      var btn = document.createElement('button');
+      btn.className = 'clip-recent-item';
+      btn.title = item.name || 'Reciente';
+      btn.onclick = function() { sendRecentClip(idx); };
+      if (item.type.indexOf('image/') === 0) {
+        btn.innerHTML = '<img src="' + item.url + '" alt="reciente" />';
+      } else {
+        btn.innerHTML = '<video src="' + item.url + '" muted playsinline></video>';
+      }
+      bar.appendChild(btn);
+    });
+  }
+
+  async function sendRecentClip(idx) {
+    var item = clipRecentItems[idx];
+    if (!item || !item.file) return;
+    await sendPickedFiles([item.file]);
+    closeClipPanel();
   }
 
   async function sha256Hex(text) {
@@ -1184,6 +1536,7 @@
     document.getElementById('btn-video-call').style.display = 'none';
     document.getElementById('chat-messages').innerHTML = '';
     document.getElementById('msg-input').value = '';
+    closeClipPanel();
     discardRecordedAudio();
     cancelEdit();
     hideGroupCallBanner();
@@ -1205,6 +1558,7 @@
 
   // --- LOGICA DE CARGA Y CHAT ---
   async function openChat(id, name) {
+    closeClipPanel();
     activeFriend = { id, name }; activeGroup = null; chatMode = 'private';
     markChatAsRead('private', id);
     document.getElementById('chat-title').textContent = "Chat con " + name;
@@ -1242,6 +1596,7 @@
   }
 
   async function openGroupChat(id, name, code) {
+    closeClipPanel();
     activeGroup = { id, name, code }; activeFriend = null; chatMode = 'group';
     markChatAsRead('groups', id);
     document.getElementById('chat-title').textContent = "Grupo: " + name;
@@ -1523,44 +1878,65 @@
     toast('Audio enviado', 'success');
   }
 
-  async function sendFile(input) {
-    var file = input.files[0];
-    if (!file) return;
-    if (!chatMode) { toast('Selecciona un chat primero'); input.value = ''; return; }
-    if (chatMode === 'private' && activeFriend && BLOCKED_CHAT_BOT_IDS.indexOf(activeFriend.id) > -1) {
-      toast('A este bot no se le puede enviar nada');
-      input.value = '';
-      return;
+  async function uploadAndSendSingleFile(file) {
+    if (!file) return false;
+    if (file.size > 50 * 1024 * 1024) {
+      toast('Archivo demasiado grande (max 50MB): ' + (file.name || 'archivo'));
+      return false;
     }
-    if (chatMode === 'private' && activeFriend && activeFriend.id === BOT_ID) {
-      toast('A la IA solo se le puede escribir texto');
-      input.value = '';
-      return;
-    }
-    if (file.size > 50 * 1024 * 1024) { toast('Archivo demasiado grande (max 50MB)'); input.value = ''; return; }
-    toast('Subiendo archivo...', 'success');
-    var ts = Date.now();
-    var safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+
+    var ts = Date.now() + Math.floor(Math.random() * 1000);
+    var fileName = file.name || ('archivo_' + ts);
+    var safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
     var path = currentUser.id + '/' + ts + '_' + safeName;
     var up = await sb.storage.from('chat-files').upload(path, file, { upsert: true });
-    if (up.error) { toast('Error al subir: ' + up.error.message); input.value = ''; return; }
+    if (up.error) {
+      toast('Error al subir ' + fileName + ': ' + up.error.message);
+      return false;
+    }
+
     var ext = '';
-    var dotIdx = file.name.lastIndexOf('.');
-    if (dotIdx > -1 && dotIdx < file.name.length - 1) ext = file.name.substring(dotIdx + 1).toLowerCase();
-    var displayName = ext ? ('archivo.' + ext) : 'archivo';
-    var meta = JSON.stringify({ path: path, displayName: displayName, type: file.type, size: file.size });
+    var dotIdx = fileName.lastIndexOf('.');
+    if (dotIdx > -1 && dotIdx < fileName.length - 1) ext = fileName.substring(dotIdx + 1).toLowerCase();
+    var detectedType = file.type || 'application/octet-stream';
+    var displayName = ext ? ('archivo.' + ext) : fileName;
+    var meta = JSON.stringify({ path: path, displayName: displayName, type: detectedType, size: file.size || 0 });
     var content = '<<FILE>>' + meta + '<<FILE>>';
+
     if (chatMode === 'private') {
       await sb.from('messages').insert({ sender_id: currentUser.id, receiver_id: activeFriend.id, content: content });
-      playAppSound('messageSent');
-      await loadMessages();
     } else {
       await sb.from('group_messages').insert({ group_id: activeGroup.id, sender_id: currentUser.id, content: content });
-      playAppSound('messageSent');
-      await loadGroupMessages();
     }
+    playAppSound('messageSent');
+    return true;
+  }
+
+  async function sendPickedFiles(files) {
+    if (!files || !files.length) return;
+    if (!canSendMediaInCurrentChat(true)) return;
+    toast(files.length > 1 ? 'Subiendo archivos...' : 'Subiendo archivo...', 'success');
+
+    var sent = 0;
+    for (var i = 0; i < files.length; i++) {
+      var ok = await uploadAndSendSingleFile(files[i]);
+      if (ok) {
+        sent++;
+        addClipRecent(files[i]);
+      }
+    }
+
+    if (!sent) return;
+    if (chatMode === 'private') await loadMessages();
+    else await loadGroupMessages();
+    toast(sent > 1 ? 'Archivos enviados' : 'Archivo enviado', 'success');
+  }
+
+  async function sendFile(input) {
+    var files = Array.from((input && input.files) || []);
+    if (!files.length) return;
+    await sendPickedFiles(files);
     input.value = '';
-    toast('Archivo enviado', 'success');
   }
 
   function formatSize(bytes) {
@@ -1986,6 +2362,13 @@
     callState = 'calling';
     currentCallMediaType = mediaType;
     isMuted = false;
+    try {
+      await sb.from('call_notifications').insert({
+        caller_id: currentUser.id,
+        receiver_id: activeFriend.id,
+        media_type: mediaType === 'video' ? 'video' : 'audio'
+      });
+    } catch (_) {}
     startLoopingSound('outgoingCallPrivate');
     showOutgoingCall(activeFriend.name, mediaType);
     bindLocalPreview(localStream);

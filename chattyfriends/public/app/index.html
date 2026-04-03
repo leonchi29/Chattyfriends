@@ -619,6 +619,47 @@
 </div>
 
 <script>
+  function notifyFlutter(payload) {
+    try {
+      if (window.ChattyBridge && typeof window.ChattyBridge.postMessage === 'function') {
+        window.ChattyBridge.postMessage(JSON.stringify(payload || {}));
+      }
+    } catch (_) {}
+  }
+
+  function chattySyncNativeSession() {
+    notifyFlutter({
+      kind: 'session',
+      user: currentUser ? {
+        id: currentUser.id || '',
+        username: currentUser.username || ''
+      } : null
+    });
+  }
+
+  function chattyHandleNativeAction(encodedPayload) {
+    try {
+      var parsed = typeof encodedPayload === 'string' ? JSON.parse(encodedPayload) : encodedPayload;
+      if (!parsed) return;
+      var eventName = parsed.event || '';
+      var actionName = parsed.action || '';
+      var target = parsed.target || null;
+
+      if (eventName === 'msg' || eventName === 'grp-msg') {
+        openNotificationTarget(target);
+        return;
+      }
+
+      if (eventName === 'call-incoming' || eventName === 'gcall-incoming') {
+        if (actionName === 'accept' || actionName === '') {
+          answerCall();
+        } else if (actionName === 'reject') {
+          endCall();
+        }
+      }
+    } catch (_) {}
+  }
+
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.getRegistrations().then(function(regs) {
       regs.forEach(function(reg) { reg.unregister(); });
@@ -1507,10 +1548,15 @@
     if (!ok) return toast('Datos incorrectos');
     currentUser = sanitizeUser(data);
     localStorage.setItem('chatty_user', JSON.stringify(currentUser));
+    chattySyncNativeSession();
     startApp();
   }
 
-  function logout() { localStorage.clear(); location.reload(); }
+  function logout() {
+    notifyFlutter({ kind: 'logout' });
+    localStorage.clear();
+    location.reload();
+  }
 
   function isMobileOrTabletViewport() {
     return window.matchMedia('(max-width: 1024px)').matches;
@@ -1547,6 +1593,7 @@
     document.getElementById('login-screen').style.display = 'none';
     document.getElementById('chat-screen').style.display = 'flex';
     document.getElementById('display-user').textContent = '@' + currentUser.username;
+    chattySyncNativeSession();
     document.getElementById('ver-badge-sidebar').textContent = APP_VERSION;
     loadMyAvatar();
     loadFriends(); loadGroups(); subscribeRealtime();
@@ -2837,6 +2884,14 @@
   }
 
   function showDesktopNotification(title, body, tag, target) {
+    notifyFlutter({
+      kind: 'notify',
+      event: tag && tag.indexOf('grp-') === 0 ? 'grp-msg' : (tag && tag.indexOf('msg-') === 0 ? 'msg' : tag),
+      title: title,
+      body: body,
+      tag: tag || 'chatty-msg',
+      target: target || null
+    });
     if (Notification.permission !== 'granted') return;
     var n = new Notification(title, { body: body, tag: tag || 'chatty-msg', renotify: true });
     n.onclick = function() {
